@@ -4,6 +4,7 @@ node_modules/
 
 # 发布专用：publish.mjs 从这里读 npm 两步验证码，用完即删，绝不入库
 .publish.env
+.publish.env.bak-*
 
 # 编辑器 / 系统
 .DS_Store
