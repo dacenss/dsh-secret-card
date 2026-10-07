@@ -147,31 +147,56 @@ section 注册失败、本轮运行直接报错 `malformed prompt variable refer
 
 ## 发布到 npm
 
-npm 开了两步验证（`auth-and-writes`），发布时要一个 6 位验证码。本仓库用自己的
-插件来收这个码 —— **AI 全程看不到验证码**：
+npm 开了两步验证（`auth-and-writes`）。**先确认你的账号用的是哪种 2FA**，两种走法完全不同：
+
+| 账号 2FA 方式 | npm 发布时要什么 | 本仓库的做法 |
+| --- | --- | --- |
+| 只有**安全密钥**（security keys，如指纹 / 硬件键） | 不输任何码，在浏览器里摸一下钥匙 | 直接 `npm run publish`，npm 自己开浏览器 |
+| 有**认证器 App**（TOTP，6 位滚动码） | 一个 6 位验证码 | 让 AI 弹卡片收码，AI 看不到明文 |
+
+### 情况一：只有安全密钥（本机当前就是这种）
+
+账号设置页显示 `2 security keys`、没有任何 Authenticator App —— 这种账号**根本没有 6 位滚动码可输**。
+npm CLI 对此有内置的「网页授权」流程（`npm/lib/utils/auth.js` 里那段 `webAuthOpener`）：
+发布请求被 401 打回时，npm 自动打开浏览器，你在浏览器里完成安全密钥验证，它拿到令牌后自己重试发布。
+
+这条路**唯一的硬条件是必须跑在真实终端里**，所以那条命令要你自己在 PowerShell 窗口敲：
+
+```powershell
+cd C:\Users\izhjs\Documents\deepseek-harness\default-workspace\dsh-secret-card
+npm run publish        # 先 npm pack，再 npm publish <tarball>
+```
+
+浏览器弹出 npm 授权页后，用你的安全密钥（指纹）确认一下即可，全程不需要输任何东西。
+
+### 情况二：有认证器 App
+
+这时可以用本插件来收验证码，**AI 全程看不到码**：
 
 ```
 AI 调 secret_card(target=.publish.env, key=NPM_OTP)   ← 只描述位置，参数里没有码
    ▼
 你在弹窗卡片里输入 6 位验证码 → 插件写进 .publish.env（文件不在 git、不在发布包里）
    ▼
-node scripts/publish.mjs   ← 读文件、把码塞进 NPM_CONFIG_OTP 环境变量、跑 npm publish
+npm run publish        ← 读 .publish.env → npm pack → npm publish <tarball>
    ▼
 .publish.env 用完即删
-```
-
-```powershell
-npm test                 # 改完先自己跑一遍：45 项全绿才去弹卡片
-npm run publish          # 读 .publish.env → npm pack → npm publish <tarball>
 ```
 
 验证码只走环境变量（`NPM_CONFIG_OTP`，npm 原生支持），**不进命令行参数**，
 进程列表里看不到；`.publish.env` 用完立即删除，`.gitignore` 里也挡着。
 
-为了让「你输完码」到「码送到 npm」之间不超过几秒（验证码约 30 秒过期），
+### 为什么要「先 pack 再发布」
+
 `scripts/publish.mjs` 走的是**先 `npm pack` 打好包、再发布这个 tarball**：
-发布已打好的 tarball 时 npm 不跑生命周期脚本，所以 `prepublishOnly` 那几秒测试
-不会吃掉验证码窗口。人工直接敲 `npm publish` 时 `prepublishOnly` 照样会跑。
+发布已打好的 tarball 时 npm 不跑任何生命周期脚本，所以 `prepublishOnly`（构建 + 检查 + 45 项测试）
+那几秒不会挤占验证窗口。人工直接敲 `npm publish` 时 `prepublishOnly` 照样会跑。
+
+改完代码先自己跑一遍，全绿再发：
+
+```powershell
+npm test               # 36 单元 + 8 集成 + 1 文案红线守卫
+```
 
 ## 安装
 
