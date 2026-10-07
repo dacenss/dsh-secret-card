@@ -25,8 +25,8 @@ function walk(dir, out = []) {
   return out;
 }
 
-// 只扫会进入 npm 发布包的文件：src / client / package.json / README / cordis.patch.yml
-const PUBLISHED = ["src", "client", "package.json", "README.md", "cordis.patch.yml"];
+// 只扫会进入 npm 发布包的文件：src / client / package.json / README(中英) / cordis.patch.yml
+const PUBLISHED = ["src", "client", "package.json", "README.md", "README.en.md", "cordis.patch.yml"];
 const files = [];
 for (const rel of PUBLISHED) {
   const abs = path.join(ROOT, rel);

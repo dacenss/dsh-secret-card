@@ -35,7 +35,8 @@
     "src",
     "client",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "README.en.md"
   ],
   "scripts": {
     "check": "node --check src/index.js && node --check client/index.js",

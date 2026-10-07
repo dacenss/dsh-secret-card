@@ -1,6 +1,6 @@
 # dsh-secret-card
 
-> npm 包名 `dsh-secret-card` · 源码与问题反馈：<https://github.com/dacenss/dsh-secret-card> · MIT
+> npm 包名 `dsh-secret-card` · 源码与问题反馈：<https://github.com/dacenss/dsh-secret-card> · MIT · **English: [README.en.md](./README.en.md)**
 
 dsh 插件 · **密钥安全输入卡片**。
 
@@ -22,7 +22,7 @@ pnpm add dsh-secret-card
 数组，然后重启 DSH。
 
 > 不确定 profile 名的话，看 `$env:USERPROFILE\.dsh\profiles\` 下有哪几个目录；
-> 装了插件市场的话也可以直接从界面里添加。装了插件市场的话也可以直接从界面里添加。
+> 装了插件市场的话也可以直接从界面里添加。
 
 `cordis.patch.yml` 会把插件插进名册，客户端产物 `client/bundle.js` 已随 npm 包
 预构建，装完即可用，不需要额外构建步骤。
