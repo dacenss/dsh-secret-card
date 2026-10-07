@@ -1,0 +1,62 @@
+{
+  "name": "dsh-secret-card",
+  "version": "0.1.0",
+  "description": "dsh 插件 · 密钥安全输入卡片：AI 需要用户提供密钥（API Key / Token / 密码）时只负责描述「该写到哪个文件、哪个键」；密钥由用户在弹窗卡片中直接输入，由本插件写入配置文件并可选验证是否生效，密钥全程不进入会话记录，AI 只拿到「写入与验证结果」。",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "secret",
+    "api-key",
+    "security"
+  ],
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./client/bundle.js",
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=22.5",
+    "dsh": ">=0.1.7-rc.2"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "files": [
+    "src",
+    "client",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "check": "node --check src/index.js && node --check client/index.js",
+    "build:client": "node scripts/build-client.mjs",
+    "test": "node test/secret-card.test.mjs && node test/integration.test.mjs && node test/copy-guard.test.mjs",
+    "install:local": "pwsh scripts/install-local.ps1",
+    "prepublishOnly": "npm run build:client && npm run check && npm test",
+    "publish": "node scripts/publish.mjs"
+  },
+  "devDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dacenss/dsh-secret-card.git"
+  },
+  "homepage": "https://github.com/dacenss/dsh-secret-card#readme",
+  "bugs": {
+    "url": "https://github.com/dacenss/dsh-secret-card/issues"
+  }
+}
