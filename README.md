@@ -161,12 +161,17 @@ node scripts/publish.mjs   ← 读文件、把码塞进 NPM_CONFIG_OTP 环境变
 ```
 
 ```powershell
-npm version patch      # 或 minor / 0.1.0 这种具体号；只改 package.json 与 tag
-npm run publish        # 内部先 prepublishOnly（构建 + check + 45 项测试）再发布
+npm test                 # 改完先自己跑一遍：45 项全绿才去弹卡片
+npm run publish          # 读 .publish.env → npm pack → npm publish <tarball>
 ```
 
 验证码只走环境变量（`NPM_CONFIG_OTP`，npm 原生支持），**不进命令行参数**，
-进程列表里看不到；`.publish.env` 发布成功后立即删除，`.gitignore` 里也挡着。
+进程列表里看不到；`.publish.env` 用完立即删除，`.gitignore` 里也挡着。
+
+为了让「你输完码」到「码送到 npm」之间不超过几秒（验证码约 30 秒过期），
+`scripts/publish.mjs` 走的是**先 `npm pack` 打好包、再发布这个 tarball**：
+发布已打好的 tarball 时 npm 不跑生命周期脚本，所以 `prepublishOnly` 那几秒测试
+不会吃掉验证码窗口。人工直接敲 `npm publish` 时 `prepublishOnly` 照样会跑。
 
 ## 安装
 
