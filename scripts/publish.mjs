@@ -11,8 +11,8 @@
 // 也就是说：这个账号根本没有 6 位滚动验证码可输 —— 之前三次填同一个值被 npm
 // 判无效码，原因就在这里，不是填错，是那种码不存在。
 //
-// 安全密钥的正确用法是 npm CLI 自带的「网页授权」流程，见
-// C:\Users\izhjs\nodejs\node_modules\npm\lib\utils\auth.js:14-23
+// 安全密钥的正确用法是 npm CLI 自带的「网页授权」流程，见本机 npm 安装目录下
+// lib\utils\auth.js 的 otplease()（第 10 行是 TTY 硬条件，14-23 行是网页授权分支）
 //   npm 把发布请求发过去 →  registry 回 401 且带 authUrl / doneUrl
 //   →  npm 自动打开浏览器 →  你在浏览器里完成安全密钥（指纹/硬件键）验证
 //   →  npm 拿到令牌后自己重试发布，全程不需要你手动输任何码
@@ -21,7 +21,7 @@
 // 否则 auth.js 第 10 行会直接抛出原始 401。所以下面这条命令要由你在
 // PowerShell 窗口里敲，不能让 AI 在后台代跑：
 //
-//     cd C:\Users\izhjs\Documents\deepseek-harness\default-workspace\dsh-secret-card
+//     cd <本插件的源码目录>
 //     npm run publish
 //
 // ── 目录里如果出现了 .publish.env ─────────────────────────────────────────────
@@ -40,7 +40,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ROOT = path.resolve(path.dirname(fileURLtoPath(import.meta.url)), "..");
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ENV_FILE = path.join(ROOT, ".publish.env");
 
 function die(msg) {
