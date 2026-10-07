@@ -117,6 +117,19 @@ metadata.google.internal`，可在设置里增删）时直接拒绝。
 | `allowedSuffixes` | 见上 | 允许写入的文件后缀白名单 |
 | `allowCommandValidation` | `false` | 是否允许 AI 提供命令验证 |
 | `denyHosts` | 见上 | HTTP 验证禁止访问的主机 |
+| `language` | `auto` | 界面语言：`auto` 按本机语言识别、`zh` 中文、`en` 英文 |
+
+## 界面语言
+
+界面文字分两处，各自按本机语言识别，**识别不到一律用英文**：
+
+| 位置 | 文字给谁看 | 识别方式 |
+| --- | --- | --- |
+| 输入卡片 | 用户 | 浏览器语言（`navigator.language`） |
+| 工具说明 / 回执 / 系统提示 | 模型 | 环境变量 `LC_ALL` / `LC_MESSAGES` / `LANG` / `LANGUAGE`，再兜到系统locale |
+
+语言串只要以 `zh` 开头（`zh`、`zh-CN`、`zh-TW`…）就走中文，其余全部走英文。
+想固定语言，改设置页的 `language`：填 `zh` 或 `en` 就锁死不动，填 `auto` 恢复自动识别。
 
 ## 工具返回值契约
 
@@ -151,8 +164,13 @@ metadata.google.internal`，可在设置里增删）时直接拒绝。
 ```bash
 npm run check           # node --check 宿主与客户端源码
 npm run build:client    # client/index.js → client/bundle.js
-npm test                # 单元 + 集成 + 文案红线守卫
+npm test                # 单元 41 项 + 集成 8 项 + 文案红线 1 项（共 50 项）
 ```
+
+加新语言要动两处：`src/index.js` 里的 `MESSAGES` 表（模型看的文案）、
+`client/index.js` 里的 `CLIENT_MESSAGES` 表（用户看的卡片文案）。两边按同一
+套判定分档（`zh` 开头走中文、其余英文），`test/secret-card.test.mjs` 里有断言
+要求两张表的键逐一对齐——漏一个键就是漏一句话。
 
 用 `file:` 协议把源码装进 profile 的话，改完源码必须手动同步（pnpm 对已装的
 file 依赖不会重新拷贝），然后重启 DSH：

@@ -377,6 +377,86 @@ test('客户端模块导出契约', () => {
   assert.equal(typeof client.apply, 'function')
 })
 
+// ── 1b. 多语言（本机语言识别、英文兜底）────────────────────────────────────
+
+test('detectLocale：zh 开头走中文，其余一律英文（兜底）', () => {
+  const { detectLocale } = host.__internals
+  assert.equal(detectLocale({ LC_ALL: 'zh_CN.UTF-8' }), 'zh')
+  assert.equal(detectLocale({ LANG: 'zh_CN.UTF-8' }), 'zh')
+  assert.equal(detectLocale({ LC_MESSAGES: 'zh_TW.UTF-8' }), 'zh')
+  assert.equal(detectLocale({ LANGUAGE: 'zh_Hans' }), 'zh')
+  assert.equal(detectLocale({ LANG: 'en_US.UTF-8' }), 'en')
+  assert.equal(detectLocale({ LANG: 'ja_JP.UTF-8' }), 'en')
+  assert.equal(detectLocale({ LANG: 'de_DE' }), 'en')
+  // 环境变量全空：落到 Intl，再落不到也只可能是 zh/en，绝不抛错
+  assert.ok(['zh', 'en'].includes(detectLocale({})), '识别不到也不能崩，只能给 zh/en')
+  assert.equal(detectLocale({ LC_ALL: '   ' }), ['zh', 'en'].includes(detectLocale({ LC_ALL: '   ' })) ? detectLocale({ LC_ALL: '   ' }) : 'en')
+  // 空串视为未设置：LANGUAGE 为空串不应把 zh_CN 顶掉
+  assert.equal(detectLocale({ LANGUAGE: '', LANG: 'zh_CN.UTF-8' }), 'zh')
+})
+
+test('resolveLocale：zh/en 直选，auto 走识别，非法值回落', () => {
+  const { resolveLocale } = host.__internals
+  assert.equal(resolveLocale('zh', { LANG: 'en_US.UTF-8' }), 'zh')
+  assert.equal(resolveLocale('en', { LANG: 'zh_CN.UTF-8' }), 'en')
+  assert.equal(resolveLocale('ZH', { LANG: 'en_US.UTF-8' }), 'zh')
+  assert.equal(resolveLocale(' EN ', { LANG: 'zh_CN.UTF-8' }), 'en')
+  assert.equal(resolveLocale('auto', { LANG: 'zh_CN.UTF-8' }), 'zh')
+  assert.equal(resolveLocale('auto', { LANG: 'fr_FR' }), 'en')
+  assert.equal(resolveLocale('français', { LANG: 'zh_CN.UTF-8' }), 'zh', '非法档位回落 auto → 按本机识别')
+  assert.equal(resolveLocale(undefined, { LANG: 'zh_CN.UTF-8' }), 'zh')
+  assert.equal(resolveLocale(null, { LANG: 'ja_JP' }), 'en')
+})
+
+test('saneConfigValues 与 sanitizePatch 接受 language 档位', () => {
+  const base = host.__internals.saneConfigValues({ language: 'en' }, DEFAULTS)
+  assert.equal(base.language, 'en')
+  const patched = host.__internals.sanitizePatch({ language: ' ZH ' })
+  assert.equal(patched.language, 'zh')
+  const bad = host.__internals.sanitizePatch({ language: 'klingon' })
+  assert.equal(bad.language, 'auto', '不认识的档位回落 auto')
+})
+
+test('MESSAGES：两张表键一致，且每条都不含双花括号/printf 占位', () => {
+  const { MESSAGES } = host.__internals
+  const zhKeys = Object.keys(MESSAGES.zh).sort()
+  const enKeys = Object.keys(MESSAGES.en).sort()
+  assert.deepEqual(zhKeys, enKeys, 'zh 与 en 必须逐键对齐，漏键就是漏翻译')
+
+  const walk = (value, out) => {
+    if (typeof value === 'string') out.push(value)
+    else if (typeof value === 'function') { try { out.push(value('K'), value('a b')) } catch {} }
+    else if (value && typeof value === 'object') Object.values(value).forEach((v) => walk(v, out))
+    return out
+  }
+  for (const locale of ['zh', 'en']) {
+    const texts = walk(MESSAGES[locale], [])
+    assert.ok(texts.length > 20, `${locale} 表应收集到 20+ 条文案，实际 ${texts.length}`)
+    for (const text of texts) {
+      assert.doesNotMatch(text, /\{\{/, `${locale} 文案出现 {{：${text.slice(0, 60)}`)
+      // printf 风格占位会让宿主二次格式化时崩（too few arguments / bad format）
+      assert.doesNotMatch(text.replace(/%%/g, ''), /%[sdifoexcgunp]/, `${locale} 文案出现 printf 占位：${text.slice(0, 60)}`)
+    }
+  }
+  // 两边的密钥占位符都要在（防改回双花括号版或被删掉）
+  for (const locale of ['zh', 'en']) {
+    assert.ok(JSON.stringify(MESSAGES[locale]).includes('%%SECRET%%'), `${locale} 表必须给出占位符写法`)
+  }
+})
+
+test('guidanceFor：两种语言的系统提示都覆盖硬规则与占位符', () => {
+  const { guidanceFor } = host.__internals
+  for (const locale of ['zh', 'en']) {
+    const text = guidanceFor(locale)
+    assert.equal(typeof text, 'string')
+    assert.ok(text.length > 200, `${locale} 系统提示不应为空壳，实际 ${text.length} 字符`)
+    assert.match(text, /secret_card/)
+    assert.match(text, /%%SECRET%%/)
+    assert.doesNotMatch(text, /\{\{/)
+  }
+  assert.notEqual(guidanceFor('zh'), guidanceFor('en'), '两种语言应给出不同文案')
+})
+
 test('客户端 bundle 契约：loader 外壳 + 原样内嵌 + return module.exports', () => {
   assert.match(bundleSource, /^\/\* Generated from client\/index\.js by scripts\/build-client\.mjs/)
   assert.match(bundleSource, /window\.__ModuleLoader__\.load\(\{/)
@@ -453,7 +533,9 @@ test('apply：注册工具、两条路由、系统提示 section，且文案不�
     sections[0].text,
     tool.description,
     JSON.stringify(tool.parameters),
-    host.__internals.SECRET_CARD_GUIDANCE
+    host.__internals.guidanceFor('zh'),
+    host.__internals.messagesFor('en').toolDescription,
+    JSON.stringify(host.__internals.messagesFor('en'))
   ]
   for (const text of texts) {
     // 只有成对出现的 {{...}} 才会被宿主当成模板变量引用；示例 JSON 里的嵌套
@@ -462,9 +544,11 @@ test('apply：注册工具、两条路由、系统提示 section，且文案不�
   }
 
   // 占位符照旧可用
-  assert.match(host.__internals.SECRET_CARD_GUIDANCE, /%%SECRET%%/)
+  for (const locale of ['zh', 'en']) {
+    assert.match(host.__internals.guidanceFor(locale), /%%SECRET%%/, `${locale} 的系统提示应给出占位符写法`)
+    assert.match(JSON.stringify(host.__internals.messagesFor(locale)), /%%SECRET%%/)
+  }
   assert.equal(host.__internals.SECRET_PLACEHOLDER, '%%SECRET%%')
-  assert.match(JSON.stringify(tool.parameters), /%%SECRET%%/)
 })
 
 test('validateSecret：HTTP 验证只回结论，响应体不进返回值', async () => {

@@ -23,6 +23,109 @@ const CLIENT_NAME = 'dsh-secret-card'
 const API = '/dsh-secret-card/api'
 const STYLE_ID = 'dsc-secret-card-style'
 
+// ── 多语言 ─────────────────────────────────────────────────────────────────
+// 客户端没有宿主的 settings 通道，只能按浏览器自己的语言识别；识别不到一律英文。
+// 宿主侧另有一张大表（src/index.js 的 MESSAGES），两边的档位判定保持一致：
+// 只要语言串以 zh 开头（zh / zh-CN / zh-TW / zh-Hant…）就走中文，其余一律英文。
+
+const CLIENT_MESSAGES = {
+  zh: {
+    emptySecret: '请先输入密钥。',
+    writing: '正在写入配置文件…',
+    submitFailed: '提交失败：网络错误或宿主无响应，可以重试或取消。',
+    submitRetry: '卡片保持打开，可以重试或取消。',
+    submitDone: '确定写入',
+    submitOk: '完成',
+    cancel: '取消',
+    defaultTitle: '请输入密钥',
+    placeholder: '在这里粘贴或输入密钥',
+    show: '显示',
+    hide: '隐藏',
+    fileLabel: '将写入：',
+    keyLabel: '　键名：',
+    safetyTitle: '安全说明：',
+    safetyBody: '你在这里输入的密钥不会出现在对话记录里，AI 也看不到；它只会被写入上面这个文件。',
+    willValidate: '写入后会自动验证这个密钥是否生效，并把结果告诉助手。',
+    seenBefore: '注意：这个键此前已经写入过一次，请确认要再次输入。',
+    okNone: '已写入配置文件。',
+    okPassed: d => `已写入，密钥生效${d}。`,
+    okFailed: d => `已写入配置，但验证未通过${d}。`,
+    wrapDetail: s => `（${s}）`,
+    genericError: '写入失败',
+    reasons: {
+      file_missing: '目标文件不存在',
+      read_failed: '读取目标文件失败',
+      write_failed: '写入失败',
+      rewrite_failed: '改写失败',
+      verify_mismatch: '写入后校验不一致',
+      key_exists: '该键已存在且不允许覆盖',
+      request_not_found: '这次请求已经结束（可能等待超时被取消），请让助手重新发起',
+      missing_requestId_or_secret: '提交内容不完整',
+      http_401: '未授权（浏览器登录状态失效，刷新页面后重试）',
+      http_403: '被宿主拒绝（安全校验未通过）',
+      http_404: '这次请求已经结束（可能等待超时被取消），请让助手重新发起',
+      http_400: '请求格式有误'
+    },
+    countdownLeft: s => `剩余 ${s} 未输入将自动取消`,
+    countdownOver: '已超时，卡片关闭'
+  },
+  en: {
+    emptySecret: 'Please enter the secret first.',
+    writing: 'Writing to the config file…',
+    submitFailed: 'Submission failed: network error or no response from the app. You can retry or cancel.',
+    submitRetry: 'The card stays open — you can retry or cancel.',
+    submitDone: 'Write it',
+    submitOk: 'Done',
+    cancel: 'Cancel',
+    defaultTitle: 'Enter the secret',
+    placeholder: 'Paste or type the secret here',
+    show: 'Show',
+    hide: 'Hide',
+    fileLabel: 'Writing to: ',
+    keyLabel: ' · key: ',
+    safetyTitle: 'Security note: ',
+    safetyBody: 'The secret you type here never appears in the conversation and the AI cannot see it. It only gets written into the file above.',
+    willValidate: 'After writing, the plugin checks whether the secret works and tells the assistant.',
+    seenBefore: 'Note: this key was already written once. Please confirm you want to enter it again.',
+    okNone: 'Written to the config file.',
+    okPassed: d => `Written, and the secret works${d}.`,
+    okFailed: d => `Written, but validation failed${d}.`,
+    wrapDetail: s => `(${s})`,
+    genericError: 'Write failed',
+    reasons: {
+      file_missing: 'The target file does not exist',
+      read_failed: 'Could not read the target file',
+      write_failed: 'Write failed',
+      rewrite_failed: 'Rewrite failed',
+      verify_mismatch: 'Content check after writing did not match',
+      key_exists: 'This key already exists and overwriting is not allowed',
+      request_not_found: 'This request already ended (it may have timed out). Ask the assistant to start a new one.',
+      missing_requestId_or_secret: 'The submission is incomplete',
+      http_401: 'Not authorized (browser session expired — reload the page and retry)',
+      http_403: 'Rejected by the host (security check failed)',
+      http_404: 'This request already ended (it may have timed out). Ask the assistant to start a new one.',
+      http_400: 'Malformed request'
+    },
+    countdownLeft: s => `${s} left before the card is cancelled`,
+    countdownOver: 'Timed out — card closed'
+  }
+}
+
+function detectLocale () {
+  try {
+    const langs = (typeof navigator !== 'undefined' && Array.isArray(navigator.languages))
+      ? navigator.languages
+      : ((typeof navigator !== 'undefined' && navigator.language) ? [navigator.language] : [])
+    for (const raw of langs) {
+      const tag = String(raw || '').toLowerCase()
+      if (tag.startsWith('zh')) return 'zh'
+      if (tag) return 'en'
+    }
+  } catch {}
+  return 'en'
+}
+
+
 // ── 样式（全部用宿主主题变量 + 兜底色值，浅色/深色自适应）───────────────────
 
 const STYLE = `<style id="${STYLE_ID}">
@@ -119,6 +222,7 @@ module.exports = {
 
       const open = new Map() // requestId → { card, overlay, input, statusNode, buttons }
       let es = null
+      const m = CLIENT_MESSAGES[detectLocale()] || CLIENT_MESSAGES.en
 
       const closeCard = (requestId, reason) => {
         const entry = open.get(requestId)
@@ -152,7 +256,7 @@ module.exports = {
         const requestId = entry.requestId
         const secret = entry.input ? entry.input.value : ''
         if (!secret) {
-          setStatus(entry, '请先输入密钥。', 'err')
+          setStatus(entry, m.emptySecret, 'err')
           try { entry.input.focus() } catch {}
           return
         }
@@ -160,10 +264,10 @@ module.exports = {
         const cancelBtn = entry.buttons.cancel
         submitBtn.disabled = true
         cancelBtn.disabled = true
-        cancelBtn.textContent = '取消'
+        cancelBtn.textContent = m.cancel
         submitBtn.textContent = ''
         submitBtn.appendChild(el('span', { class: 'dsc-spin' }))
-        setStatus(entry, '正在写入配置文件…')
+        setStatus(entry, m.writing)
         let payload
         try {
           const res = await fetch(`${API}/fill`, {
@@ -183,41 +287,27 @@ module.exports = {
         // 密钥使命完成：立刻从 DOM 上抹掉
         try { if (entry.input) entry.input.value = '' } catch {}
         if (!payload) {
-          setStatus(entry, '提交失败：网络错误或宿主无响应，可以重试或取消。', 'err')
+          setStatus(entry, m.submitFailed, 'err')
           submitBtn.disabled = false
           cancelBtn.disabled = false
-          submitBtn.textContent = '确定写入'
+          submitBtn.textContent = m.submitDone
           return
         }
         if (payload.ok === false) {
-          const reasons = {
-            file_missing: '目标文件不存在',
-            read_failed: '读取目标文件失败',
-            write_failed: '写入失败',
-            rewrite_failed: '改写失败',
-            verify_mismatch: '写入后校验不一致',
-            key_exists: '该键已存在且不允许覆盖',
-            request_not_found: '这次请求已经结束（可能等待超时被取消），请让助手重新发起',
-            missing_requestId_or_secret: '提交内容不完整',
-            http_401: '未授权（浏览器登录状态失效，刷新页面后重试）',
-            http_403: '被宿主拒绝（安全校验未通过）',
-            http_404: '这次请求已经结束（可能等待超时被取消），请让助手重新发起',
-            http_400: '请求格式有误'
-          }
           const code = payload.reason || payload.error || ''
-          const text = reasons[code] || code || '写入失败'
-          setStatus(entry, `${text}。卡片保持打开，可以重试或取消。`, 'err')
+          const text = (m.reasons && m.reasons[code]) || code || m.genericError
+          setStatus(entry, `${text}${m.submitRetry}`, 'err')
           submitBtn.disabled = false
           cancelBtn.disabled = false
-          submitBtn.textContent = '确定写入'
+          submitBtn.textContent = m.submitDone
           return
         }
         const v = payload.validation
-        const detail = payload.validationDetail ? `（${payload.validationDetail}）` : ''
-        if (v === 'passed') setStatus(entry, `已写入，密钥生效${detail}。`, 'ok')
-        else if (v === 'failed') setStatus(entry, `已写入配置，但验证未通过${detail}。`, 'err')
-        else setStatus(entry, '已写入配置文件。', 'ok')
-        submitBtn.textContent = '完成'
+        const detail = payload.validationDetail ? m.wrapDetail(payload.validationDetail) : ''
+        if (v === 'passed') setStatus(entry, m.okPassed(detail), 'ok')
+        else if (v === 'failed') setStatus(entry, m.okFailed(detail), 'err')
+        else setStatus(entry, m.okNone, 'ok')
+        submitBtn.textContent = m.submitOk
         submitBtn.disabled = true
         setTimeout(() => closeCard(requestId), 1600)
       }
@@ -225,7 +315,7 @@ module.exports = {
       const openCard = (card) => {
         if (!card || typeof card.requestId !== 'string') return
         if (open.has(card.requestId)) return
-        const title = typeof card.label === 'string' && card.label.trim() ? card.label.trim() : '请输入密钥'
+        const title = typeof card.label === 'string' && card.label.trim() ? card.label.trim() : m.defaultTitle
         const targetFile = typeof card.file === 'string' ? card.file : ''
         const targetKey = typeof card.key === 'string' ? card.key : ''
         const masked = card.masked !== false
@@ -234,7 +324,7 @@ module.exports = {
         const input = el('input', {
           class: 'dsc-input',
           type: masked ? 'password' : 'text',
-          placeholder: '在这里粘贴或输入密钥',
+          placeholder: m.placeholder,
           autocomplete: 'new-password',
           autocapitalize: 'off',
           autocorrect: 'off',
@@ -243,15 +333,15 @@ module.exports = {
         const toggleBtn = el('button', {
           class: 'dsc-toggle',
           type: 'button',
-          text: masked ? '显示' : '隐藏',
+          text: masked ? m.show : m.hide,
           onclick: () => {
             const nowHidden = input.type === 'password'
             input.type = nowHidden ? 'text' : 'password'
-            toggleBtn.textContent = nowHidden ? '隐藏' : '显示'
+            toggleBtn.textContent = nowHidden ? m.hide : m.show
           }
         })
-        const submitBtn = el('button', { class: 'dsc-btn dsc-btn-primary', type: 'button', text: '确定写入' })
-        const cancelBtn = el('button', { class: 'dsc-btn', type: 'button', text: '取消' })
+        const submitBtn = el('button', { class: 'dsc-btn dsc-btn-primary', type: 'button', text: m.submitDone })
+        const cancelBtn = el('button', { class: 'dsc-btn', type: 'button', text: m.cancel })
 
         const overlay = el('div', {
           class: 'dsc-overlay',
@@ -262,9 +352,9 @@ module.exports = {
         const cardNodes = [
           el('div', { class: 'dsc-title', text: title }),
           el('div', { class: 'dsc-file' }, [
-            '将写入：',
+            m.fileLabel,
             el('b', { text: targetFile }),
-            '　键名：',
+            m.keyLabel,
             el('b', { text: targetKey })
           ])
         ]
@@ -274,14 +364,14 @@ module.exports = {
         cardNodes.push(el('div', {
           class: 'dsc-safety'
         }, [
-          el('b', { text: '安全说明：' }),
-          '你在这里输入的密钥不会出现在对话记录里，AI 也看不到；它只会被写入上面这个文件。'
+          el('b', { text: m.safetyTitle }),
+          m.safetyBody
         ]))
         if (card.willValidate) {
-          cardNodes.push(el('div', { class: 'dsc-safety', text: '写入后会自动验证这个密钥是否生效，并把结果告诉助手。' }))
+          cardNodes.push(el('div', { class: 'dsc-safety', text: m.willValidate }))
         }
         if (card.seenBefore) {
-          cardNodes.push(el('div', { class: 'dsc-safety', text: '注意：这个键此前已经写入过一次，请确认要再次输入。' }))
+          cardNodes.push(el('div', { class: 'dsc-safety', text: m.seenBefore }))
         }
         const countdownNode = el('div', { class: 'dsc-countdown' })
         cardNodes.push(countdownNode)
@@ -301,8 +391,8 @@ module.exports = {
           entry.tick = setInterval(() => {
             const left = Math.max(0, deadline - Date.now())
             countdownNode.textContent = left > 0
-              ? `剩余 ${Math.floor(left / 60000)}:${String(Math.floor(left % 60000 / 1000)).padStart(2, '0')} 未输入将自动取消`
-              : '已超时，卡片关闭'
+              ? m.countdownLeft(`${Math.floor(left / 60000)}:${String(Math.floor(left % 60000 / 1000)).padStart(2, '0')}`)
+              : m.countdownOver
             if (left <= 0) {
               clearInterval(entry.tick)
               closeCard(card.requestId, 'user')

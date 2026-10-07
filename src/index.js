@@ -70,7 +70,9 @@ const DEFAULTS = {
   // 是否允许 AI 提供「命令验证」。命令执行风险高于 HTTP 验证，默认关
   allowCommandValidation: false,
   // HTTP 验证禁止访问的主机（SSRF 护栏：本机、内网、云元数据地址）
-  denyHosts: ['localhost', '127.0.0.1', '::1', '0.0.0.0', '169.254.169.254', 'metadata.google.internal']
+  denyHosts: ['localhost', '127.0.0.1', '::1', '0.0.0.0', '169.254.169.254', 'metadata.google.internal'],
+  // 界面语言。auto = 按本机语言识别，识别不到用英文；zh / en = 固定
+  language: 'auto'
 }
 
 // 0.1.7 loader 通过 entry.fiber.runtime.Config 自动发现 schema，必须在模块顶层
@@ -87,7 +89,8 @@ function settingsSchema (Schema) {
     backupKeep: Schema.number().step(1).min(0).max(50).default(DEFAULTS.backupKeep).volatile(),
     allowedSuffixes: Schema.array(Schema.string()).default(DEFAULTS.allowedSuffixes).volatile(),
     allowCommandValidation: Schema.boolean().default(DEFAULTS.allowCommandValidation).volatile(),
-    denyHosts: Schema.array(Schema.string()).default(DEFAULTS.denyHosts).volatile()
+    denyHosts: Schema.array(Schema.string()).default(DEFAULTS.denyHosts).volatile(),
+    language: Schema.string().default(DEFAULTS.language).volatile()
   })
 }
 
@@ -114,7 +117,139 @@ const HTTP_TIMEOUT_MS = 15000
 const COMMAND_TIMEOUT_MS = 20000
 const KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/
 const HEADER_NAME_PATTERN = /^[A-Za-z0-9-]+$/
-const RESULT_NOTE = '密钥已由用户在卡片中直接输入并写入文件；本结果不含密钥明文，也不要去读该文件的值。'
+// ── 多语言：按本机语言识别，英文兜底 ────────────────────────────────────────
+// 所有交给宿主或用户的文案都走这张表（模型看的系统提示、工具说明、返回给模型的
+// 提示、render 表格），识别不到语言一律用英文。
+// 识别的两处来源：进程环境变量（Linux/macOS 的 setlocale 会写在这里）→ ICU 默认
+// locale（Windows 上它反映系统区域设置）。都读不到才回落英文。
+
+const SUPPORTED_LOCALES = ['zh', 'en']
+
+const MESSAGES = {
+  zh: {
+    toolDescription: '配置过程需要用户提供密钥（API Key / Token / 密码）时调用本工具。'
+      + '你只描述密钥要写入哪里：文件路径、键名、格式、给用户看的标题与说明、可选的生效性验证方式。'
+      + '密钥由用户在弹出卡片里直接输入并写入文件，本工具的返回值只包含写入与验证结果，不含密钥。'
+      + '参数里绝不要出现任何密钥内容；也不要让用户在对话里直接贴密钥。',
+    argTarget: '密钥要写入的文件路径。绝对路径，或相对当前会话工作目录；文件必须已存在，后缀需在白名单内（.env/.json/.yaml/.yml/.toml）',
+    argKey: '键名，如 OPENAI_API_KEY、ANTHROPIC_API_KEY。只允许字母数字下划线点连字符',
+    argFormat: '写入格式。缺省按文件后缀推断',
+    argLabel: '卡片标题，如「OpenAI API Key」',
+    argHint: '给用户的说明：这个密钥是干什么的、去哪里获取。不得包含任何密钥内容',
+    argValidation: '可选的生效性验证，JSON 字符串。'
+      + 'HTTP：{"kind":"http","method":"GET","url":"https://api.example.com/v1/verify","header":{"Authorization":"Bearer %%SECRET%%"},"expectStatus":200,"expectBodyContains":"ok"}；'
+      + '命令：{"kind":"command","argv":["npm","run","check"],"stdinTemplate":"%%SECRET%%\\n"}（密钥只走 stdin，禁止出现在 argv）。'
+      + '省略表示不验证',
+    argMasked: '输入框是否掩码显示，默认 true',
+    argOverwrite: '键已存在时是否覆盖写入，默认 true',
+    resultNote: '密钥已由用户在卡片中直接输入并写入文件；本结果不含密钥明文，也不要去读该文件的值。',
+    resultTitle: '密钥写入结果',
+    resultHead: '| 项 | 值 |',
+    rowStatus: '状态',
+    rowReason: '原因',
+    rowValidation: '验证',
+    rowFile: '文件',
+    rowKey: '键名',
+    rowBackup: '备份',
+    rowFingerprint: '指纹',
+    disabled: 'dsh-secret-card 已在设置中停用。',
+    missingTargetKey: '缺少 target 或 key。',
+    badKey: (key) => `键名不合法：${key}`,
+    keyPlaceholder: '键名不得包含占位符。',
+    hintPlaceholder: '说明文字不得包含占位符（占位符只允许出现在验证规格里）。',
+    badTarget: '路径解析失败。',
+    suffixNotAllowed: (list) => `只允许写入这些后缀的文件：${list}`,
+    unknownFormat: '无法从后缀推断格式，请显式传 format（env/json/yaml/toml）。',
+    busy: '已有一张卡片正等待用户输入；一次只处理一个密钥，请等结果返回后再调用。',
+    labelFallback: (key) => `请输入「${key}」`,
+    guidance: [
+      'dsh-secret-card 已启用：配置过程需要用户提供密钥（API key / token / 密码 / webhook 密钥）时调用工具 `secret_card`，不要让用户把它贴进对话。你只描述元数据：目标文件、键名、格式、给用户看的标题与说明、可选的生效性验证方式。用户在弹出的卡片里输入密钥，插件会直接写进配置文件；若提供了验证规格，插件还会顺便检查密钥是否生效。你的工具结果只包含写入与验证结果（status、file、key、backup、fingerprint），不含密钥本身。',
+      '硬性规则：',
+      '- 任何密钥值都不得出现在工具参数、消息、文件名或 shell 命令里；也不得要求用户在对话里贴密钥。',
+      '- 通过 `secret_card` 写入的键值不要再读回来；文件内容属于敏感信息，即使技术上能打开。',
+      '- 验证规格以 JSON 字符串传入，例如 {"kind":"http","method":"GET","url":"https://api.example.com/v1/verify","header":{"Authorization":"Bearer %%SECRET%%"},"expectStatus":200}。只有占位符 %%SECRET%% 代表密钥；它只允许出现在 header 值与 bodyTemplate 里，绝不能出现在命令 argv 里。',
+      '- 一次一张卡：等结果返回后再请求下一个密钥。结果为 busy 表示还有一张卡片开着。',
+      '目标文件必须已存在且后缀在白名单内（.env/.json/.yaml/.yml/.toml）；未知格式需显式传 format。'
+    ]
+  },
+  en: {
+    toolDescription: 'Call this tool when a configuration task needs a secret from the user (API key, token, password, webhook secret).'
+      + 'You only describe where the secret goes: target file, key name, format, a label and hint for the user, and an optional validation request.'
+      + 'The user types the secret into a card that this plugin renders; the plugin writes it straight into the config file and, when you supplied a validation spec, checks whether the secret works.'
+      + 'Never put a secret value in an argument, and never ask the user to paste a secret into the chat.',
+    argTarget: 'File path the secret is written to. Absolute, or relative to the current session working directory. The file must already exist and its suffix must be in the whitelist (.env/.json/.yaml/.yml/.toml).',
+    argKey: 'Key name, e.g. OPENAI_API_KEY or ANTHROPIC_API_KEY. Only letters, digits, underscore, dot and hyphen are allowed.',
+    argFormat: 'Write format. Inferred from the file suffix when omitted.',
+    argLabel: 'Card title, for example "OpenAI API Key".',
+    argHint: 'Note for the user: what this secret is for and where to get it. Must not contain any secret content.',
+    argValidation: 'Optional validation, as a JSON string.'
+      + 'HTTP: {"kind":"http","method":"GET","url":"https://api.example.com/v1/verify","header":{"Authorization":"Bearer %%SECRET%%"},"expectStatus":200,"expectBodyContains":"ok"};'
+      + 'command: {"kind":"command","argv":["npm","run","check"],"stdinTemplate":"%%SECRET%%\\n"} (the secret may only travel through stdin, never through argv).'
+      + 'Omit to skip validation.',
+    argMasked: 'Whether the input box masks what is typed. Defaults to true.',
+    argOverwrite: 'Whether to overwrite the value when the key already exists. Defaults to true.',
+    resultNote: 'The secret was typed by the user into a card and written to the file. This result contains no secret value, and you must not read the value back from the file.',
+    resultTitle: 'Secret write result',
+    resultHead: '| Field | Value |',
+    rowStatus: 'Status',
+    rowReason: 'Reason',
+    rowValidation: 'Validation',
+    rowFile: 'File',
+    rowKey: 'Key',
+    rowBackup: 'Backup',
+    rowFingerprint: 'Fingerprint',
+    disabled: 'dsh-secret-card is disabled in the settings.',
+    missingTargetKey: 'Both target and key are required.',
+    badKey: (key) => `Invalid key name: ${key}`,
+    keyPlaceholder: 'The key name must not contain the placeholder.',
+    hintPlaceholder: 'The hint text must not contain the placeholder (it is only allowed inside the validation spec).',
+    badTarget: 'Could not resolve the path.',
+    suffixNotAllowed: (list) => `Only files with these suffixes are allowed: ${list}`,
+    unknownFormat: 'Cannot infer the format from the suffix. Pass format explicitly (env/json/yaml/toml).',
+    busy: 'A card is already waiting for user input; only one secret is handled at a time. Wait for the result before calling again.',
+    labelFallback: (key) => `Enter the secret for ${key}`,
+    guidance: [
+      'dsh-secret-card is active: when a configuration task needs a secret from the user (API key, token, password, webhook secret), call the tool `secret_card` instead of asking the user to paste it in chat. You only describe metadata: target file, key name, format, a label and hint for the user, and an optional validation request. The user types the secret into a card that this plugin renders; the plugin writes it straight into the config file and, when you supplied a validation spec, checks whether the secret works. Your tool result contains only the write and validation outcome (status, file, key, backup, fingerprint) — never the secret itself.',
+      'Hard rules:',
+      '- Never put a secret value in a tool argument, a message, a filename, or a shell command; never ask the user to paste a secret into the chat.',
+      '- Never read back the value of a key you wrote through `secret_card`; the file content is sensitive even though you can technically open it.',
+      '- Pass the validation spec as a JSON string, e.g. {"kind":"http","method":"GET","url":"https://api.example.com/v1/verify","header":{"Authorization":"Bearer %%SECRET%%"},"expectStatus":200}. Only the placeholder %%SECRET%% stands for the secret; it may appear in header values and bodyTemplate only, never in a command argv.',
+      '- One card at a time: wait for the result before requesting another secret. A "busy" result means a card is still open.',
+      'The target file must already exist and its suffix must be in the whitelist (.env/.json/.yaml/.yml/.toml); pass format explicitly when the suffix is unknown.'
+    ]
+  }
+}
+
+// auto → 按本机语言识别；zh / en → 固定。非法值一律 auto。
+// env 可注入（测试用）：不传就读 process.env
+function resolveLocale (pref, env = process.env) {
+  const p = typeof pref === 'string' ? pref.trim().toLowerCase() : ''
+  if (SUPPORTED_LOCALES.includes(p)) return p
+  return detectLocale(env)
+}
+
+function detectLocale (env = process.env) {
+  for (const name of ['LC_ALL', 'LC_MESSAGES', 'LANG', 'LANGUAGE']) {
+    const raw = (env || {})[name]
+    if (!raw) continue
+    const code = String(raw).toLowerCase()
+    if (code.startsWith('zh')) return 'zh'
+    if (code) return 'en'
+  }
+  try {
+    const resolved = Intl.DateTimeFormat().resolvedOptions().locale
+    if (resolved) return String(resolved).toLowerCase().startsWith('zh') ? 'zh' : 'en'
+  } catch {}
+  return 'en'
+}
+
+function messagesFor (pref) {
+  return MESSAGES[resolveLocale(pref)]
+}
+
+function guidanceFor (pref) {
+  return messagesFor(pref).guidance.join('\n')
+}
 
 // ── 纯函数：配置清洗与通用小工具 ────────────────────────────────────────────
 
@@ -542,17 +677,7 @@ async function validateSecret (spec, secret, cfg) {
   return { validation: 'skipped', validationDetail: 'no_validation' }
 }
 
-// ── 给模型的系统提示（走 ctx.systemPrompt.section，同 dsh-mcp-manager）─────
-
-const SECRET_CARD_GUIDANCE = [
-  'dsh-secret-card is active: when a configuration task needs a secret from the user (API key, token, password, webhook secret), call the tool `secret_card` instead of asking the user to paste it in chat. You only describe metadata: target file, key name, format, a label and hint for the user, and an optional validation request. The user types the secret into a card that this plugin renders; the plugin writes it straight into the config file and, when you supplied a validation spec, checks whether the secret works. Your tool result contains only the write and validation outcome (status, file, key, backup, fingerprint) — never the secret itself.',
-  'Hard rules:',
-  '- Never put a secret value in a tool argument, a message, a filename, or a shell command; never ask the user to paste a secret into the chat.',
-  '- Never read back the value of a key you wrote through `secret_card`; the file content is sensitive even though you can technically open it.',
-  '- Pass the validation spec as a JSON string, e.g. {"kind":"http","method":"GET","url":"https://api.example.com/v1/verify","header":{"Authorization":"Bearer %%SECRET%%"},"expectStatus":200}. Only the placeholder %%SECRET%% stands for the secret; it may appear in header values and bodyTemplate only, never in a command argv.',
-  '- One card at a time: wait for the result before requesting another secret. A "busy" result means a card is still open.',
-  '目标文件必须已存在且后缀在白名单内（.env/.json/.yaml/.yml/.toml）；未知格式需显式传 format。'
-].join('\n')
+// ── 给模型的系统提示走 MESSAGES[locale].guidance，见上面「多语言」一节 ─────────
 
 // ── 插件本体 ────────────────────────────────────────────────────────────────
 
@@ -594,6 +719,8 @@ async function applyAsync (ctx, config = {}) {
   }
   refreshLive()
   const effective = () => ({ ...base, ...liveSettings, ...memoryPatch })
+  // 当前语言的文案表：每次现取，设置里改 language 立刻生效
+  const msg = () => messagesFor(effective().language)
 
   try {
     ctx.effect(() => {
@@ -649,7 +776,7 @@ async function applyAsync (ctx, config = {}) {
     key: record.card.key,
     ...(extra.backup ? { backup: extra.backup } : {}),
     ...(extra.fingerprint ? { fingerprint: extra.fingerprint } : {}),
-    note: RESULT_NOTE
+    note: msg().resultNote
   })
 
   // ── SSE 路由（exact）──
@@ -806,48 +933,42 @@ async function applyAsync (ctx, config = {}) {
   if (ctx.tools && typeof ctx.tools.register === 'function') {
     ctx.effect(() => ctx.tools.register({
       name: TOOL_NAME,
-      description: '配置过程需要用户提供密钥（API Key / Token / 密码）时调用本工具。'
-        + '你只描述密钥要写入哪里：文件路径、键名、格式、给用户看的标题与说明、可选的生效性验证方式。'
-        + '密钥由用户在弹出卡片里直接输入并写入文件，本工具的返回值只包含写入与验证结果，不含密钥。'
-        + '参数里绝不要出现任何密钥内容；也不要让用户在对话里直接贴密钥。',
+      description: msg().toolDescription,
       parameters: {
         type: 'object',
         properties: {
           target: {
             type: 'string',
-            description: '密钥要写入的文件路径。绝对路径，或相对当前会话工作目录；文件必须已存在，后缀需在白名单内（.env/.json/.yaml/.yml/.toml）'
+            description: msg().argTarget
           },
           key: {
             type: 'string',
-            description: '键名，如 OPENAI_API_KEY、ANTHROPIC_API_KEY。只允许字母数字下划线点连字符'
+            description: msg().argKey
           },
           format: {
             type: 'string',
             enum: ['env', 'json', 'yaml', 'toml'],
-            description: '写入格式。缺省按文件后缀推断'
+            description: msg().argFormat
           },
           label: {
             type: 'string',
-            description: '卡片标题，如「OpenAI API Key」'
+            description: msg().argLabel
           },
           hint: {
             type: 'string',
-            description: '给用户的说明：这个密钥是干什么的、去哪里获取。不得包含任何密钥内容'
+            description: msg().argHint
           },
           validation: {
             type: 'string',
-            description: '可选的生效性验证，JSON 字符串。'
-              + 'HTTP：{"kind":"http","method":"GET","url":"https://api.example.com/v1/verify","header":{"Authorization":"Bearer %%SECRET%%"},"expectStatus":200,"expectBodyContains":"ok"}；'
-              + '命令：{"kind":"command","argv":["npm","run","check"],"stdinTemplate":"%%SECRET%%\\n"}（密钥只走 stdin，禁止出现在 argv）。'
-              + '省略表示不验证'
+            description: msg().argValidation
           },
           masked: {
             type: 'boolean',
-            description: '输入框是否掩码显示，默认 true'
+            description: msg().argMasked
           },
           overwrite: {
             type: 'boolean',
-            description: '键已存在时是否覆盖写入，默认 true'
+            description: msg().argOverwrite
           }
         },
         required: ['target', 'key']
@@ -874,34 +995,36 @@ async function applyAsync (ctx, config = {}) {
         // 返回值，第一个是本次调用的入参
         render: (_args, value) => {
           const p = (value && typeof value === 'object') ? value : {}
+          const m = msg()
           const rows = [
-            ['状态', p.status],
-            [p.reason ? '原因' : '验证', p.reason || `${p.validation || 'skipped'}${p.validationDetail ? ` (${p.validationDetail})` : ''}`],
-            ['文件', p.file],
-            ['键名', p.key],
-            [p.backup ? '备份' : null, p.backup],
-            [p.fingerprint ? '指纹' : null, p.fingerprint]
+            [m.rowStatus, p.status],
+            [p.reason ? m.rowReason : m.rowValidation, p.reason || `${p.validation || 'skipped'}${p.validationDetail ? ` (${p.validationDetail})` : ''}`],
+            [m.rowFile, p.file],
+            [m.rowKey, p.key],
+            [p.backup ? m.rowBackup : null, p.backup],
+            [p.fingerprint ? m.rowFingerprint : null, p.fingerprint]
           ].filter((row) => row[0] && row[1])
-          const table = ['| 项 | 值 |', '| --- | --- |', ...rows.map(([k, v]) => `| ${k} | ${String(v).replace(/\|/g, '\\|')} |`)].join('\n')
-          return [{ type: 'text', text: `**密钥写入结果**\n\n${table}\n\n${p.note || RESULT_NOTE}` }]
+          const table = [m.resultHead, '| --- | --- |', ...rows.map(([k, v]) => `| ${k} | ${String(v).replace(/\|/g, '\\|')} |`)].join('\n')
+          return [{ type: 'text', text: `**${m.resultTitle}**\n\n${table}\n\n${p.note || m.resultNote}` }]
         }
       },
       isConcurrencySafe: () => false,
       execute: async (args, exec) => {
         const cfg = effective()
+        const m = msg()
         if (cfg.enabled !== true) {
-          return { status: 'failed', reason: 'disabled', note: 'dsh-secret-card 已在设置中停用。' }
+          return { status: 'failed', reason: 'disabled', note: m.disabled }
         }
         const fail = (reason, note) => ({ status: 'failed', reason, note: note || reason })
 
         // ── 参数与目标文件 ──
         const target = typeof args.target === 'string' ? args.target.trim() : ''
         const key = typeof args.key === 'string' ? args.key.trim() : ''
-        if (!target || !key) return fail('bad_request', '缺少 target 或 key。')
-        if (!KEY_PATTERN.test(key)) return fail('bad_key', `键名不合法：${key}`)
-        if (key.includes(SECRET_PLACEHOLDER)) return fail('bad_key', '键名不得包含占位符。')
+        if (!target || !key) return fail('bad_request', m.missingTargetKey)
+        if (!KEY_PATTERN.test(key)) return fail('bad_key', m.badKey(key))
+        if (key.includes(SECRET_PLACEHOLDER)) return fail('bad_key', m.keyPlaceholder)
         if (typeof args.hint === 'string' && args.hint.includes(SECRET_PLACEHOLDER)) {
-          return fail('bad_hint', '说明文字不得包含占位符（占位符只允许出现在验证规格里）。')
+          return fail('bad_hint', m.hintPlaceholder)
         }
 
         const cwd = exec && exec.agent && exec.agent.session && exec.agent.session.header
@@ -911,16 +1034,16 @@ async function applyAsync (ctx, config = {}) {
         try {
           filePath = nodePath.resolve(typeof cwd === 'string' && cwd ? cwd : process.cwd(), target)
         } catch {
-          return fail('bad_target', '路径解析失败。')
+          return fail('bad_target', m.badTarget)
         }
         const suffixes = (Array.isArray(cfg.allowedSuffixes) ? cfg.allowedSuffixes : DEFAULTS.allowedSuffixes)
           .map((s) => String(s || '').toLowerCase()).filter(Boolean)
         const lowerPath = filePath.toLowerCase()
         if (!suffixes.some((s) => lowerPath.endsWith(s))) {
-          return fail('suffix_not_allowed', `只允许写入这些后缀的文件：${suffixes.join(' ')}`)
+          return fail('suffix_not_allowed', m.suffixNotAllowed(suffixes.join(' ')))
         }
         const format = detectFormat(filePath, args.format)
-        if (!format) return fail('unknown_format', '无法从后缀推断格式，请显式传 format（env/json/yaml/toml）。')
+        if (!format) return fail('unknown_format', m.unknownFormat)
 
         const sessionId = exec && exec.agent && exec.agent.session && typeof exec.agent.session.id === 'string'
           ? exec.agent.session.id
@@ -942,7 +1065,7 @@ async function applyAsync (ctx, config = {}) {
             status: 'busy',
             file: filePath,
             key,
-            note: '已有一张卡片正等待用户输入；一次只处理一个密钥，请等结果返回后再调用。'
+            note: m.busy
           }
         }
 
@@ -951,7 +1074,7 @@ async function applyAsync (ctx, config = {}) {
         const overwrite = args.overwrite !== false
         const label = typeof args.label === 'string' && args.label.trim()
           ? args.label.trim()
-          : `请输入「${key}」`
+          : m.labelFallback(key)
         const hint = typeof args.hint === 'string' ? args.hint.trim() : ''
 
         // ── 建卡并等待 ──
@@ -1034,7 +1157,7 @@ async function applyAsync (ctx, config = {}) {
       const dispose = ctx.systemPrompt.section({
         name: `plugin:${PLUGIN_ID}`,
         order: 170,
-        text: SECRET_CARD_GUIDANCE
+        text: guidanceFor(effective().language)
       })
       if (typeof dispose === 'function') {
         ctx.effect(() => dispose, `${PLUGIN_ID}: prompt section`)
@@ -1094,6 +1217,10 @@ function sanitizePatch (body) {
   if ('denyHosts' in patch) {
     patch.denyHosts = (patch.denyHosts || []).map((s) => String(s || '').trim()).filter(Boolean)
   }
+  if ('language' in patch) {
+    const v = String(patch.language || '').trim().toLowerCase()
+    patch.language = SUPPORTED_LOCALES.includes(v) ? v : 'auto'
+  }
   if ('allowedSuffixes' in patch) {
     patch.allowedSuffixes = (patch.allowedSuffixes || []).map((s) => String(s || '').trim().toLowerCase()).filter(Boolean)
   }
@@ -1107,9 +1234,13 @@ module.exports = {
   __internals: {
     DEFAULTS,
     TOOL_NAME,
-    SECRET_CARD_GUIDANCE,
+    SUPPORTED_LOCALES,
+    MESSAGES,
+    detectLocale,
+    resolveLocale,
+    messagesFor,
+    guidanceFor,
     SECRET_PLACEHOLDER,
-    RESULT_NOTE,
     saneConfigValues,
     sanitizePatch,
     safeSettings,

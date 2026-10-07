@@ -21,7 +21,7 @@ const SECRET = 'sk-integration-9f8e7d6c5b4a'
 function tmp () { return mkdtempSync(join(tmpdir(), 'dsc-int-')) }
 
 /** 模拟宿主：收集注册进来的工具与路由，并把路由按 kind 挂到 http server。 */
-async function boot () {
+async function boot (language) {
   const tools = []
   const routes = []
   const sections = []
@@ -36,7 +36,8 @@ async function boot () {
     webServer: { register: (route) => { routes.push(route); return () => {} } },
     systemPrompt: { section: (s) => { sections.push(s); return () => {} } }
   }
-  await host.apply(ctx, {})
+  // 语言固定下来：不依赖跑测试那台机器的本机语言
+  await host.apply(ctx, { language: language || 'zh' })
 
   const server = http.createServer((req, res) => {
     const path = new URL(req.url || '/', 'http://127.0.0.1').pathname
@@ -115,7 +116,7 @@ test('全链路：建卡 → pending → fill → 写文件 → 工具返回脱�
     assert.equal(result.key, 'OPENAI_API_KEY')
     assert.equal(result.file, file)
     assert.match(result.backup, /\.bak-\d{8}-\d{9}$/)
-    assert.equal(result.note, host.__internals.RESULT_NOTE)
+    assert.equal(result.note, host.__internals.messagesFor('zh').resultNote)
 
     // 文件真写进去了
     const text = readFileSync(file, 'utf8')
