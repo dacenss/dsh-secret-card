@@ -43,7 +43,7 @@ AI 调用 secret_card(file, key, format, label, hint, validation?)
    ▼
 宿主生成 requestId，SSE 推给页面
    ▼
-页面弹模态卡片 ← 用户输入密钥
+会话列输入框上方弹出卡片 ← 用户输入密钥
    │  POST /api/dsh-secret-card/fill {requestId, secret}   ← 密钥唯一一次过网（同源）
    ▼
 宿主：写入配置文件（先备份、临时文件 + rename 原子落盘、读回校验）
@@ -158,6 +158,16 @@ metadata.google.internal`，可在设置里增删）时直接拒绝。
 ```
 
 `fingerprint` 只是写入内容的哈希前 8 位，用于肉眼核对，不足以反推密钥。
+
+## 卡片停在哪、怎么提醒
+
+- 卡片挂在**会话列里输入框的正上方**（宿主 `conversation.input.dock` / `conversation.composer`
+  插槽），与内置问答卡片同一套几何与圆角；弹出时输入框整块让位，收起只留标题。
+- 卡片一到达就向宿主登记一条「待应答」（`ctx.uiSession.registerPendingInteraction`，
+  kind 为 `question`）：会话列表亮黄点、装了什么提醒插件都会通知。**登记和卡片显不显示无关**——
+  用户此刻不在会话页、卡片在排队时，黄点和提醒照样亮。
+- 卡片关闭、写入完成或宿主主动取消时立刻撤下登记，不会留下僵尸黄点。
+- 宿主没有这些插槽时退回页面底部停靠，绝不抢非会话页面。
 
 ## 已知限制
 

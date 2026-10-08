@@ -796,7 +796,9 @@ async function applyAsync (ctx, config = {}) {
     willValidate: record.validation && record.validation.kind !== 'none',
     seenBefore: completed.has(record.signature),
     // 卡片寿命：客户端照着显示倒计时，到点自己收掉，与宿主超时对齐
-    expiresAt: record.deadline
+    expiresAt: record.deadline,
+    // 生效语言：客户端没有宿主 settings 通道，跟着宿主的 language 设置走
+    locale: resolveLocale(effective().language)
   })
 
   const currentCards = (sessionId) => [...pending.values()]
@@ -946,7 +948,16 @@ async function applyAsync (ctx, config = {}) {
             return
           }
 
-          // PUT /settings — 设置页写回（持久化进 profile patch）
+          // GET /settings — 客户端设置面板读取当前生效值（GET /status 也带一份）
+          if (req.method === 'GET' && apiPath.endsWith(`${API_BASE}/settings`)) {
+            sendJson(res, 200, {
+              settings: safeSettings(effective()),
+              defaults: safeSettings(DEFAULTS)
+            })
+            return
+          }
+
+          // PUT /settings — 设置面板写回（持久化进 profile patch）
           if (req.method === 'PUT' && apiPath.endsWith(`${API_BASE}/settings`)) {
             const body = await readJsonBody(req)
             const patch = sanitizePatch(body)
@@ -1241,7 +1252,10 @@ function safeSettings (cfg) {
     backupKeep: cfg.backupKeep,
     allowedSuffixes: Array.isArray(cfg.allowedSuffixes) ? cfg.allowedSuffixes.slice() : [],
     allowCommandValidation: cfg.allowCommandValidation === true,
-    denyHosts: Array.isArray(cfg.denyHosts) ? cfg.denyHosts.slice() : []
+    denyHosts: Array.isArray(cfg.denyHosts) ? cfg.denyHosts.slice() : [],
+    language: SUPPORTED_LOCALES.includes(String(cfg.language || '').toLowerCase())
+      ? String(cfg.language).toLowerCase()
+      : 'auto'
   }
 }
 

@@ -6,6 +6,9 @@ node_modules/
 .publish.env
 .publish.env.bak-*
 
+# 本地排查用的临时脚本（asar 解包 / DOM 冒烟 / CSS 探针），不随包发布
+.tmp-*
+
 # 编辑器 / 系统
 .DS_Store
 Thumbs.db

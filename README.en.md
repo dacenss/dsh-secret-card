@@ -47,7 +47,7 @@ AI calls secret_card(file, key, format, label, hint, validation?)
    ▼
 Host mints a requestId and pushes it over SSE
    ▼
-A modal card appears on the page ← user types the secret
+A card appears above the composer in the conversation column ← user types the secret
    │  POST /api/dsh-secret-card/fill {requestId, secret}   ← the one and only trip across the wire (same origin)
    ▼
 Host: writes the config file (back up first, temp file + rename for an atomic write, then read back and verify)
@@ -172,6 +172,22 @@ else selects English. To pin a language, set `language` in the settings page: `z
 
 `fingerprint` is just the first 8 hex characters of the written value's hash, for
 eyeballing a match. It cannot be reversed into the secret.
+
+## Where the card sits and how you get reminded
+
+- The card docks **right above the composer inside the conversation column** (the host's
+  `conversation.input.dock` / `conversation.composer` slots), sharing the same geometry and
+  corner radius as the built-in question card. While it is open the composer steps aside;
+  collapsing it leaves only the title.
+- The moment a card arrives it registers a "pending interaction" with the host
+  (`ctx.uiSession.registerPendingInteraction`, kind `question`): the session list lights up a
+  warning dot and whatever reminder plugin you have installed fires too. **Registering is
+  independent of whether the card is visible** — if you are not on the conversation page and
+  the card is queued, the dot and the reminder still show up.
+- Closing the card, a successful write, or a host-side cancel retracts the registration
+  immediately, so no zombie dots are left behind.
+- If the host has none of those slots the card falls back to docking at the bottom of the
+  page, and it never hijacks a non-conversation page.
 
 ## Known limits
 

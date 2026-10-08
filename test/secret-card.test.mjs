@@ -526,8 +526,13 @@ test('客户端 bundle 契约：loader 外壳 + 原样内嵌 + return module.exp
   assert.match(bundleSource, /var module = \{ exports: \{\} \}/)
   assert.match(bundleSource, /return module\.exports/)
   assert.match(bundleSource, /module\.exports = \{/)
-  // 卡片不会引用 React：纯 DOM 实现
-  assert.doesNotMatch(bundleSource, /require\(['"]react['"]\)/)
+  // 卡片本体仍是纯 DOM。React 只允许出现在「宿主设置页 tab 桥」这一处：
+  // 宿主设置页的 tab 位是 React 插槽，React 由宿主的浏览器模块表提供，
+  // 插件不自带、不重复安装，所以只 require 一次 react、且不碰 react-dom。
+  const reactRequires = bundleSource.match(/require\(['"]react['"]\)/g) || []
+  assert.equal(reactRequires.length, 1, `require('react') 只应出现一次，实际 ${reactRequires.length} 次`)
+  assert.doesNotMatch(bundleSource, /react-dom/, '不得打包 react-dom')
+  assert.doesNotMatch(bundleSource, /require\(['"]react\/jsx-runtime['"]\)/, '不得走 jsx-runtime')
 })
 
 test('宿主 apply 可被调用且不依赖宿主服务（惰性 armed）', async () => {
