@@ -66,14 +66,24 @@ resolve pending → 工具返回脱敏 JSON → AI 看到
 
 | 格式 | 写法 |
 | --- | --- |
-| `.env` / `.env.*` | `KEY="value"` |
+| `.env` / `.env.*` | `KEY=value`（值含空白或引号、美元、井号、反引号、反斜杠等特殊字符时才写作 `KEY="value"` 并转义） |
 | `.json` | `"KEY": "value"`（不做 parse/stringify，注释、键顺序、缩进、尾逗号原样保留） |
-| `.yaml` / `.yml` | `KEY: "value"`（值无特殊字符时输出无引号形式） |
+| `.yaml` / `.yml` | `KEY: value`（值含特殊字符时输出 `KEY: "value"` 引号形式） |
 | `.toml` | `KEY = "value"` |
 
 - 键已存在 → 覆盖（`overwrite:false` 时拒绝并返回 `key_exists`）
 - 键不存在 → 追加到文件尾 / JSON 里插到最外层最后一个键之后
 - **只处理根级键**；目标文件必须已存在，且后缀在设置的白名单内（默认 `.env env .json .yaml .yml .toml`）
+
+### 取值方怎么读回真值
+
+写入结果里的 `quoted` 字段说明本次落盘是否带引号，渲染表格的「落盘写法」一栏也会写明：
+
+- `quoted:false` —— 文件里就是 `KEY=值` 本身，直接取等号后面的部分即可
+- `quoted:true` —— 文件里是 `KEY="值"`，读取时先剥掉首尾双引号，再按 `\\` → `\`、`\"` → `"`、`\r` → 回车、`\n` → 换行 还原转义
+
+env/yaml 的无特殊字符值一律原样落盘，就是为了让 `grep`/`cut`/substring 这类朴素读法
+直接拿到真值；只有绕不开的特殊字符才动用引号，此时 `quoted:true` 会把规则讲清楚。
 
 ## 可选的「密钥是否生效」验证
 

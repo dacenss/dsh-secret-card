@@ -133,7 +133,9 @@ const MESSAGES = {
       + '参数里绝不要出现任何密钥内容；也不要让用户在对话里直接贴密钥。',
     argTarget: '密钥要写入的文件路径。绝对路径，或相对当前会话工作目录；文件必须已存在，后缀需在白名单内（.env/.json/.yaml/.yml/.toml）',
     argKey: '键名，如 OPENAI_API_KEY、ANTHROPIC_API_KEY。只允许字母数字下划线点连字符',
-    argFormat: '写入格式。缺省按文件后缀推断',
+    argFormat: '写入格式（env/json/yaml/toml）。缺省按文件后缀推断。'
+      + 'env：值不含空白及特殊字符时原样写 KEY=value，否则加双引号并按 \\ " \\r \\n 转义；'
+      + 'yaml 同理按需引号；json/toml 恒为双引号字面量。',
     argLabel: '卡片标题，如「OpenAI API Key」',
     argHint: '给用户的说明：这个密钥是干什么的、去哪里获取。不得包含任何密钥内容',
     argValidation: '可选的生效性验证，JSON 字符串。'
@@ -150,6 +152,9 @@ const MESSAGES = {
     rowValidation: '验证',
     rowFile: '文件',
     rowKey: '键名',
+    rowFormat: '落盘写法',
+    formatRaw: 'KEY=值，无引号，原样取用即可',
+    formatQuoted: 'KEY="值"，带引号：读取时剥掉首尾双引号，再按 \\\\ → \\、" → "、\\r → 回车、\\n → 换行 还原转义',
     rowBackup: '备份',
     rowFingerprint: '指纹',
     disabled: 'dsh-secret-card 已在设置中停用。',
@@ -168,6 +173,7 @@ const MESSAGES = {
       '- 任何密钥值都不得出现在工具参数、消息、文件名或 shell 命令里；也不得要求用户在对话里贴密钥。',
       '- 通过 `secret_card` 写入的键值不要再读回来；文件内容属于敏感信息，即使技术上能打开。',
       '- 验证规格以 JSON 字符串传入，例如 {"kind":"http","method":"GET","url":"https://api.example.com/v1/verify","header":{"Authorization":"Bearer %%SECRET%%"},"expectStatus":200}。只有占位符 %%SECRET%% 代表密钥；它只允许出现在 header 值与 bodyTemplate 里，绝不能出现在命令 argv 里。',
+      '- 落盘写法：值不含空白及 \'"$#`\\ 等特殊字符时原样写 KEY=value（含 yaml 同理、按需引号）；只有必要时才加双引号并按 \\ " \\r \\n 转义。结果里的 quoted 字段为 true 表示本次写入了带引号的形式，任何读取方都要先剥掉首尾双引号再还原转义；false 则为原样值。',
       '- 一次一张卡：等结果返回后再请求下一个密钥。结果为 busy 表示还有一张卡片开着。',
       '目标文件必须已存在且后缀在白名单内（.env/.json/.yaml/.yml/.toml）；未知格式需显式传 format。'
     ]
@@ -179,7 +185,9 @@ const MESSAGES = {
       + 'Never put a secret value in an argument, and never ask the user to paste a secret into the chat.',
     argTarget: 'File path the secret is written to. Absolute, or relative to the current session working directory. The file must already exist and its suffix must be in the whitelist (.env/.json/.yaml/.yml/.toml).',
     argKey: 'Key name, e.g. OPENAI_API_KEY or ANTHROPIC_API_KEY. Only letters, digits, underscore, dot and hyphen are allowed.',
-    argFormat: 'Write format. Inferred from the file suffix when omitted.',
+    argFormat: 'Write format (env/json/yaml/toml). Inferred from the file suffix when omitted.'
+      + 'env: a value with no whitespace or special characters is written as-is (KEY=value); otherwise it gets double quotes with \\\\, \\", \\r and \\n escaping.'
+      + 'yaml follows the same quote-when-needed rule; json and toml are always double-quoted literals.',
     argLabel: 'Card title, for example "OpenAI API Key".',
     argHint: 'Note for the user: what this secret is for and where to get it. Must not contain any secret content.',
     argValidation: 'Optional validation, as a JSON string.'
@@ -196,6 +204,9 @@ const MESSAGES = {
     rowValidation: 'Validation',
     rowFile: 'File',
     rowKey: 'Key',
+    rowFormat: 'On-disk form',
+    formatRaw: 'KEY=value, unquoted — read it as-is',
+    formatQuoted: 'KEY="value", quoted — strip the surrounding double quotes, then unescape \\\\ → \\, \\" → ", \\r → CR, \\n → newline',
     rowBackup: 'Backup',
     rowFingerprint: 'Fingerprint',
     disabled: 'dsh-secret-card is disabled in the settings.',
@@ -214,6 +225,7 @@ const MESSAGES = {
       '- Never put a secret value in a tool argument, a message, a filename, or a shell command; never ask the user to paste a secret into the chat.',
       '- Never read back the value of a key you wrote through `secret_card`; the file content is sensitive even though you can technically open it.',
       '- Pass the validation spec as a JSON string, e.g. {"kind":"http","method":"GET","url":"https://api.example.com/v1/verify","header":{"Authorization":"Bearer %%SECRET%%"},"expectStatus":200}. Only the placeholder %%SECRET%% stands for the secret; it may appear in header values and bodyTemplate only, never in a command argv.',
+      '- On-disk form: a value with no whitespace and none of the characters \'"$#`\\ is written as-is (KEY=value; yaml follows the same quote-when-needed rule). Only when necessary does it get double quotes with \\, ", \\r and \\n escaping. The result field quoted is true when this write added quotes; any reader must then strip the surrounding double quotes and unescape the sequences, and false means the value is on disk as-is.',
       '- One card at a time: wait for the result before requesting another secret. A "busy" result means a card is still open.',
       'The target file must already exist and its suffix must be in the whitelist (.env/.json/.yaml/.yml/.toml); pass format explicitly when the suffix is unknown.'
     ]
@@ -330,10 +342,14 @@ function jsonLiteral (value) {
 }
 
 // yaml 的值不含特殊字符时保持无引号的清爽写法
-function yamlLiteral (value) {
+function yamlLiteralInfo (value) {
   const v = String(value)
-  if (/[:#\[\]{}&*!|>'"%@`,]|^[\s]|[\s]$/.test(v)) return quotedLiteral(v)
-  return v
+  if (/[:#\[\]{}&*!|>'"%@`,]|^[\s]|[\s]$/.test(v)) return { literal: quotedLiteral(v), quoted: true }
+  return { literal: v, quoted: false }
+}
+
+function yamlLiteral (value) {
+  return yamlLiteralInfo(value).literal
 }
 
 function detectFormat (filePath, explicit) {
@@ -351,10 +367,30 @@ function detectFormat (filePath, explicit) {
   return null
 }
 
+// env：不含空白、不含 shell/解析器特殊字符的值原样写入 KEY=value——grep、
+// cut、substring 这类朴素读法拿到的就是真值本身（旧版一律加引号，读取方
+// 忘了剥引号就会把引号当成密钥的一部分，踩过一次坑）。只有必要时才加双
+// 引号并按 \" \\ \r \n 转义，quoted:true 提示读取方先剥引号再还原转义
+const ENV_RAW_SAFE = /^[^\s"'`\\$#]+$/
+
+function envLiteralInfo (value) {
+  const v = String(value)
+  if (v.length > 0 && ENV_RAW_SAFE.test(v)) return { literal: v, quoted: false }
+  return { literal: quotedLiteral(v), quoted: true }
+}
+
+// 四种格式的统一出口，返回 { literal, quoted }；literal 是落盘的字面量，
+// quoted 表示它带引号（读取方需要剥引号，必要时还原转义）。json/toml 恒
+// 为引号形式；env/yaml 按需
+function literalInfo (format, secret) {
+  if (format === 'yaml') return yamlLiteralInfo(secret)
+  if (format === 'env') return envLiteralInfo(secret)
+  const literal = format === 'json' ? jsonLiteral(secret) : quotedLiteral(secret)
+  return { literal, quoted: true }
+}
+
 function literalFor (format, secret) {
-  if (format === 'json') return jsonLiteral(secret)
-  if (format === 'yaml') return yamlLiteral(secret)
-  return quotedLiteral(secret)
+  return literalInfo(format, secret).literal
 }
 
 // 四个改写函数统一返回 { text, replaced }；text 为 null 表示目标结构不识别
@@ -468,7 +504,7 @@ function writeSecret (options) {
     return { status: 'failed', reason: 'read_failed' }
   }
 
-  const literal = literalFor(format, secret)
+  const { literal, quoted } = literalInfo(format, secret)
   const rewritten = rewriteConfig(format, original, key, literal)
   if (rewritten === null || typeof rewritten.text !== 'string') {
     return { status: 'failed', reason: 'rewrite_failed' }
@@ -499,8 +535,8 @@ function writeSecret (options) {
   } catch {
     return { status: 'failed', reason: 'verify_failed' }
   }
-  if (back === rewritten.text && rewritten.replaced === true) return { status: 'written', backup: backupPath }
-  if (back.includes(literal)) return { status: 'written', backup: backupPath }
+  if (back === rewritten.text && rewritten.replaced === true) return { status: 'written', backup: backupPath, quoted }
+  if (back.includes(literal)) return { status: 'written', backup: backupPath, quoted }
   return { status: 'failed', reason: 'verify_mismatch' }
 }
 
@@ -774,6 +810,8 @@ async function applyAsync (ctx, config = {}) {
     ...(extra.validationDetail ? { validationDetail: extra.validationDetail } : {}),
     file: record.card.file,
     key: record.card.key,
+    // 落盘值是否带引号：false = KEY=value 原样，true = 带引号需剥引号并还原转义
+    ...(extra.quoted !== undefined ? { quoted: extra.quoted } : {}),
     ...(extra.backup ? { backup: extra.backup } : {}),
     ...(extra.fingerprint ? { fingerprint: extra.fingerprint } : {}),
     note: msg().resultNote
@@ -869,6 +907,7 @@ async function applyAsync (ctx, config = {}) {
               validation: v.validation,
               validationDetail: v.validationDetail,
               backup: write.backup,
+              quoted: write.quoted,
               fingerprint: fingerprintOf(secret)
             })
             sendJson(res, 200, {
@@ -985,6 +1024,7 @@ async function applyAsync (ctx, config = {}) {
             key: { type: 'string' },
             backup: { type: 'string' },
             fingerprint: { type: 'string' },
+            quoted: { type: 'boolean' },
             note: { type: 'string' }
           }
         },
@@ -1001,6 +1041,9 @@ async function applyAsync (ctx, config = {}) {
             [p.reason ? m.rowReason : m.rowValidation, p.reason || `${p.validation || 'skipped'}${p.validationDetail ? ` (${p.validationDetail})` : ''}`],
             [m.rowFile, p.file],
             [m.rowKey, p.key],
+            // 落盘写法一栏：读取方（脚本或后续调用）照这一行决定要不要剥引号
+            [p.quoted === false ? m.rowFormat : null, p.quoted === false ? m.formatRaw : null],
+            [p.quoted === true ? m.rowFormat : null, p.quoted === true ? m.formatQuoted : null],
             [p.backup ? m.rowBackup : null, p.backup],
             [p.fingerprint ? m.rowFingerprint : null, p.fingerprint]
           ].filter((row) => row[0] && row[1])
@@ -1252,6 +1295,8 @@ module.exports = {
     escapeRegExp,
     detectFormat,
     literalFor,
+    literalInfo,
+    envLiteralInfo,
     replaceEnv,
     replaceJson,
     replaceYaml,

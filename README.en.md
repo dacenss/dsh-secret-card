@@ -70,14 +70,25 @@ resolve pending → tool returns redacted JSON → AI sees
 
 | Format | Written as |
 | --- | --- |
-| `.env` / `.env.*` | `KEY="value"` |
+| `.env` / `.env.*` | `KEY=value` (only values with whitespace or a quote, dollar, hash, backtick or backslash become `KEY="value"` with escaping) |
 | `.json` | `"KEY": "value"` (no parse/stringify — comments, key order, indentation and trailing commas stay as they were) |
-| `.yaml` / `.yml` | `KEY: "value"` (unquoted form when the value has no special characters) |
+| `.yaml` / `.yml` | `KEY: value` (values with special characters become the quoted form `KEY: "value"`) |
 | `.toml` | `KEY = "value"` |
 
 - Key already present → overwritten (`overwrite:false` rejects with `key_exists`)
 - Key absent → appended at the end of the file / inserted after the last top-level key in JSON
 - **Top-level keys only.** The target file must already exist, and its suffix must be in the allowlist (default `.env env .json .yaml .yml .toml`)
+
+### How a reader recovers the real value
+
+The `quoted` field in the write result says whether this write added quotes; the "On-disk form" row in the rendered table spells it out too:
+
+- `quoted:false` — the file holds `KEY=value` as-is; take whatever follows the `=`
+- `quoted:true` — the file holds `KEY="value"`; strip the surrounding double quotes, then unescape `\\` → `\`, `\"` → `"`, `\r` → CR, `\n` → newline
+
+Simple env/yaml values are always written unquoted precisely so that naive readers
+(`grep`, `cut`, substring) get the real value directly. Quotes are reserved for values
+that actually need them, and then `quoted:true` states the parsing rule.
 
 ## Optional "does it work" validation
 

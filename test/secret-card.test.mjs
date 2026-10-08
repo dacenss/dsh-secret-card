@@ -14,7 +14,7 @@ const bundleSource = readFileSync(new URL('../client/bundle.js', import.meta.url
 const SECRET = 'sk-test-4f9a2b7c1d8e0f3a6b5c'
 const {
   writeSecret, rewriteConfig, replaceEnv, replaceJson, replaceYaml, replaceToml,
-  literalFor, detectFormat, parseValidationSpec, isHostDenied, saneConfigValues,
+  literalFor, literalInfo, envLiteralInfo, detectFormat, parseValidationSpec, isHostDenied, saneConfigValues,
   sanitizePatch, safeSettings, readJsonBody, sendJson, fingerprintOf, sseFrame,
   DEFAULTS
 } = host.__internals
@@ -156,6 +156,66 @@ test('值里的引号与反斜杠被正确转义（env/yaml/toml/json 四种字�
   assert.match(out.text, /^K="a\\"b\\\\c\$d`e f"$/m)
 })
 
+// ── 1b. env 按需引号（引号踩坑的回归）──────────────────────────────────────
+
+test('env：无特殊字符的值原样落盘，quoted=false', () => {
+  assert.deepEqual(literalInfo('env', 'sk-test-4f9a2b7c1d8e0f3a6b5c'), { literal: 'sk-test-4f9a2b7c1d8e0f3a6b5c', quoted: false })
+  const out = rewriteConfig('env', 'KEY=old\n', 'KEY', literalFor('env', 'sk-test-4f9a2b7c1d8e0f3a6b5c'))
+  assert.match(out.text, /^KEY=sk-test-4f9a2b7c1d8e0f3a6b5c$/m)
+})
+
+test('env：空白、引号、$、#、反斜杠、反引号、空值一律加引号', () => {
+  const values = ['has space', 'quote"x', "apos'x", 'dollar$sign', 'hash#tag', 'back\\slash', 'tick`cmd', 'tab\there', '  padded  ', '']
+  for (const v of values) {
+    const info = envLiteralInfo(v)
+    assert.equal(info.quoted, true, `${JSON.stringify(v)} 应该加引号`)
+    const expected = v
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"')
+      .replace(/\r/g, '\\r')
+      .replace(/\n/g, '\\n')
+    assert.equal(info.literal, `"${expected}"`, `${JSON.stringify(v)} 的转义不正确`)
+  }
+})
+
+test('env：引号形式可无损还原（朴素读法按规则剥引号+还原转义）', () => {
+  // 任何读取方（脚本或后续调用）照这条规则都能取回真值
+  const unquote = (line) => {
+    const m = line.match(/^KEY="((?:[^"\\]|\\.)*)"$/)
+    if (!m) return line.slice('KEY='.length)
+    return m[1].replace(/\\r/g, '\r').replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+  }
+  for (const v of ['plain', 'has space', 'a"b\\c$d`e f', 'tab\there', 'new\nline', 'mix "q" \\ # $']) {
+    const out = rewriteConfig('env', 'KEY=old\n', 'KEY', literalFor('env', v))
+    const line = out.text.split('\n').find((l) => l.startsWith('KEY='))
+    assert.equal(unquote(line), v, `原值 ${JSON.stringify(v)} 应能无损还原`)
+  }
+})
+
+test('literalInfo：env/yaml 按需引号，json/toml 恒为引号形式', () => {
+  assert.deepEqual(literalInfo('json', 'plain'), { literal: '"plain"', quoted: true })
+  assert.deepEqual(literalInfo('toml', 'plain'), { literal: '"plain"', quoted: true })
+  assert.deepEqual(literalInfo('yaml', 'plain'), { literal: 'plain', quoted: false })
+  assert.equal(literalInfo('yaml', 'a: b').quoted, true)
+  assert.equal(literalFor('env', 'plain'), 'plain')
+})
+
+test('writeSecret：安全值原样落盘 quoted=false；特殊值加引号 quoted=true', () => {
+  const dir = tmp()
+  const file = join(dir, '.env')
+  writeFileSync(file, 'K=old\n', 'utf8')
+  const plain = writeSecret({ filePath: file, format: 'env', key: 'K', secret: 'plain-value-123', backup: false, backupKeep: 0, overwrite: true })
+  assert.equal(plain.status, 'written')
+  assert.equal(plain.quoted, false)
+  assert.match(readFileSync(file, 'utf8'), /^K=plain-value-123$/m)
+
+  const tricky = writeSecret({ filePath: file, format: 'env', key: 'K', secret: 'a b#c', backup: false, backupKeep: 0, overwrite: true })
+  assert.equal(tricky.status, 'written')
+  assert.equal(tricky.quoted, true)
+  assert.match(readFileSync(file, 'utf8'), /^K="a b#c"$/m)
+  rmSync(dir, { recursive: true, force: true })
+})
+
 test('detectFormat：显式优先，其次后缀', () => {
   assert.equal(detectFormat('/a/b.env', 'json'), 'json')
   assert.equal(detectFormat('/a/b.env'), 'env')
@@ -176,9 +236,10 @@ test('writeSecret：覆盖写 + 备份 + 原子落盘 + 读回校验', () => {
   writeFileSync(file, 'A=1\nKEY=x\n', 'utf8')
   const out = writeSecret({ filePath: file, format: 'env', key: 'KEY', secret: SECRET, backup: true, backupKeep: 3, overwrite: true })
   assert.equal(out.status, 'written')
+  assert.equal(out.quoted, false, 'sk- 开头的典型密钥无特殊字符，应原样落盘')
   assert.match(out.backup, /\.bak-\d{8}-\d{9}$/)
   const text = readFileSync(file, 'utf8')
-  assert.match(text, /^KEY="sk-test-4f9a2b7c1d8e0f3a6b5c"$/m)
+  assert.match(text, /^KEY=sk-test-4f9a2b7c1d8e0f3a6b5c$/m)
   // 备份里是旧值
   assert.equal(readFileSync(out.backup, 'utf8'), 'A=1\nKEY=x\n')
   // 临时文件已清理

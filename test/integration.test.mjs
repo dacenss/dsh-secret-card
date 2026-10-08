@@ -117,10 +117,12 @@ test('全链路：建卡 → pending → fill → 写文件 → 工具返回脱�
     assert.equal(result.file, file)
     assert.match(result.backup, /\.bak-\d{8}-\d{9}$/)
     assert.equal(result.note, host.__internals.messagesFor('zh').resultNote)
+    // 无特殊字符的值原样落盘，quoted=false：读取方不需要剥引号
+    assert.equal(result.quoted, false)
 
     // 文件真写进去了
     const text = readFileSync(file, 'utf8')
-    assert.match(text, /^OPENAI_API_KEY="sk-integration-9f8e7d6c5b4a"$/m)
+    assert.match(text, /^OPENAI_API_KEY=sk-integration-9f8e7d6c5b4a$/m)
     assert.match(text, /^# 注释$/m)
 
     // 脱敏红线：工具返回值与渲染内容都不含密钥
@@ -325,10 +327,46 @@ test('验证失败不影响写入：密钥落盘 + validation=failed', async () 
     const result = await promise
     assert.equal(result.status, 'written')
     assert.equal(result.validation, 'failed')
-    assert.match(readFileSync(file, 'utf8'), /^OPENAI_API_KEY="sk-integration-9f8e7d6c5b4a"$/m)
+    assert.equal(result.quoted, false)
+    assert.match(readFileSync(file, 'utf8'), /^OPENAI_API_KEY=sk-integration-9f8e7d6c5b4a$/m)
     assert.doesNotMatch(JSON.stringify(result), /invalid key|sk-integration/)
   } finally {
     globalThis.fetch = realFetch
+    await h.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('带特殊字符的密钥：落盘为带引号形式，quoted=true 且渲染给出解析方式', async () => {
+  const dir = tmp()
+  const h = await boot()
+  const tricky = 'a"b\\c$d`e f'
+  try {
+    const file = join(dir, '.env')
+    writeFileSync(file, 'A=1\n', 'utf8')
+    const promise = h.tool.execute({ target: file, key: 'TRICKY_KEY' }, session)
+    const card = (await (await fetch(`${h.base}/dsh-secret-card/api/pending`)).json()).requests[0]
+    const fillRes = await fetch(`${h.base}/dsh-secret-card/api/fill`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requestId: card.requestId, secret: tricky })
+    })
+    assert.equal(fillRes.status, 200)
+    const fill = await fillRes.json()
+    assert.equal(fill.ok, true)
+
+    const result = await promise
+    assert.equal(result.status, 'written')
+    assert.equal(result.quoted, true)
+    assert.match(readFileSync(file, 'utf8'), /^TRICKY_KEY="a\\"b\\\\c\$d`e f"$/m)
+    // 脱敏红线：结果与渲染都不含密钥
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(tricky.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    const rendered = h.tool.output.render({ target: file, key: 'TRICKY_KEY' }, result)
+    assert.match(rendered[0].text, /落盘写法/)
+    assert.match(rendered[0].text, /带引号/)
+    assert.match(rendered[0].text, /剥掉首尾双引号/)
+    assert.doesNotMatch(rendered[0].text, new RegExp(tricky.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  } finally {
     await h.close()
     rmSync(dir, { recursive: true, force: true })
   }
