@@ -13,6 +13,8 @@ should go; the user types it straight into a pop-up card; the plugin writes it i
 config file. The AI never sees the plaintext and only gets two answers back: "did it get
 written" and "does it work".**
 
+![The secret input card: the AI only names the target file and key, the user types the secret straight into the card, never into the chat](docs/secret-card-demo.png)
+
 ## Install
 
 Go to the dsh profile directory and install with the pnpm that ships with DSH:
