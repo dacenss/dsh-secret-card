@@ -34,7 +34,16 @@ const { createRequire } = require('node:module')
 const { pathToFileURL } = require('node:url')
 const { homedir } = require('node:os')
 
+// 诊断文件落点：插件自己目录下。install-local.ps1 同步 src/index.js 时会一起带
+// 过去，读的时候直接开这个文件，不用问用户要日志
+const DIAG_FILE = nodePath.join(__dirname, '.dsc-diag.json')
+
+const { join, dirname } = nodePath
+
 // ── 依赖解析（宿主 vendored schemastery 优先；缺席只损失设置 UI）───────────
+
+// 供 dumpDiagnostics() 回报：schemastery 到底从哪条路拿到的（拿到 / 每条为何失败）
+const schemasteryAttempts = []
 
 // 宿主 dsh 全局安装里的 vendored 副本路径。跟随 dsh bin 的真实位置：
 // process.execPath 可能指向捆绑的 node 运行时，不能从它推导；用 DSH_GLOBAL_PREFIX
@@ -47,13 +56,84 @@ function hostCandidatePaths (pkgName, rel) {
   )
 }
 
-const { join } = nodePath
+// app.asar 里的 vendored 副本（本机实测位置）。asar 由 Electron 的 fs patch 支持，
+// 普通 require 能直接读。
+function asarCandidatePaths (pkgName, rel) {
+  const roots = []
+  const exe = process.execPath
+  if (exe) roots.push(dirname(exe))
+  roots.push('E:\\dsh\\resources\\app.asar\\dsh\\node_modules')
+  return roots.map((root) => join(root, 'node_modules', '@deepseek-ai', pkgName, rel))
+}
+
+// 从 __dirname 逐级往上找 node_modules/@deepseek-ai/<pkg>。插件被装进
+// <profile>/node_modules/dsh-secret-card 时，schemastery 就在同一层 node_modules 里。
+function walkUpCandidates (pkgName, rel) {
+  const out = []
+  let dir = __dirname
+  for (let i = 0; i < 8; i += 1) {
+    out.push(join(dir, 'node_modules', '@deepseek-ai', pkgName, rel))
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return out
+}
+
+// 通过「解析 package.json 再显式 require lib/index.cjs」拿模块。
+// 这一步是为绕过宿主沙箱里的一个坑：@deepseek-ai/schemastery 是
+// "type": "module" + exports { import: ./lib/index.mjs, require: ./lib/index.cjs }，
+// 沙箱化的 require 若按 import 条件解析裸标识符，就会抛
+// "Cannot require() ES Module"（dsh-smart-title 的注释记过这个坑）。
+// 显式带 .cjs 后缀的路径不受 export 条件影响，扩展名直接决定按 CJS 解析。
+function requireCjsEntry (fromFile) {
+  const req = createRequire(fromFile)
+  let pkgJson
+  try {
+    pkgJson = req.resolve('@deepseek-ai/schemastery/package.json')
+  } catch {
+    return null
+  }
+  const pkgDir = dirname(pkgJson)
+  const mod = req(join(pkgDir, 'lib', 'index.cjs'))
+  return (mod && (mod.default || mod.Schema)) ? mod : null
+}
 
 function loadSchemasterySync () {
-  for (const target of hostCandidatePaths('schemastery', 'lib/index.cjs')) {
-    try { return createRequire(target)(target) } catch {}
+  const tried = []
+  const attempt = (label, target, loader) => {
+    try {
+      const mod = loader()
+      if (mod && typeof mod.object === 'function') {
+        schemasteryAttempts.push(`${label}: ${target}`)
+        return mod
+      }
+      tried.push(`${label}: 取到模块但没有 object() — ${target}`)
+    } catch (error) {
+      tried.push(`${label}: ${(error && error.code) || (error && error.message) || error} — ${target}`)
+    }
+    return null
   }
-  try { return require('@deepseek-ai/schemastery') } catch {}
+
+  // 1. 宿主持有的 vendored 副本（显式 .cjs 文件路径）
+  for (const target of [...hostCandidatePaths('schemastery', 'lib/index.cjs'), ...asarCandidatePaths('schemastery', 'lib/index.cjs')]) {
+    const mod = attempt('host-cjs', target, () => createRequire(target)(target))
+    if (mod) return mod
+  }
+  // 2. 逐级上跳（插件装在 profile 的 node_modules 下时命中这一条）
+  for (const target of walkUpCandidates('schemastery', 'lib/index.cjs')) {
+    const mod = attempt('walkup-cjs', target, () => createRequire(target)(target))
+    if (mod) return mod
+  }
+  // 3. 裸标识符 → package.json → 显式 .cjs（绕开 export 条件）
+  const viaExports = attempt('exports-cjs', __filename, () => requireCjsEntry(__filename))
+  if (viaExports) return viaExports
+  // 4. 裸标识符直接 require（普通 Node / 测试环境）
+  const direct = attempt('bare-require', '@deepseek-ai/schemastery', () => require('@deepseek-ai/schemastery'))
+  if (direct) return direct
+
+  schemasteryAttempts.length = 0
+  schemasteryAttempts.push(...tried)
   return null
 }
 
@@ -758,6 +838,227 @@ async function applyAsync (ctx, config = {}) {
   // 当前语言的文案表：每次现取，设置里改 language 立刻生效
   const msg = () => messagesFor(effective().language)
 
+  // ── 设置持久化（宿主 settings.update + 原生改写兜底）────────────────────
+  //
+  // 背景：ctx.settings.update() 内部会「写 profile patch 文件 → 让 loader 就地重载
+  // 全部插件 → 重载失败就把 patch 文件写回原样并抛错」。任何一环出问题，设置就只活在
+  // 进程内的 memoryPatch 里，重启即丢——而用户侧只看到一句「已保存」。
+  //
+  // 因此这里做三件事：
+  //   1. 把真实失败原因记进 settingsError，经 /status 与 /settings 暴露给设置页，
+  //      并 ctx.logger.error 落盘——「已保存」不许把静默失败盖掉。
+  //   2. 宿主那条路失败时，用官方留的原生逃生口（ctx.settings.prepareDocument()
+  //       返回 patchPath，注释写着 "Locate the profile patch for native editing"）
+  //       自己把 config 写进 profile patch。重启后由 loader 读走。
+  //   3. 原生改写前先备份，写完再读回来核对，对不上就把备份还原回去。
+  //
+  // 刻意不引 js-yaml：profile patch 是宿主自己的 YAML（允许 !!js 表达式标签），
+  // 整体 parse/stringify 有丢标签、改风格的风险；而且插件并不依赖 js-yaml，
+  // 解析不到就整个兜底失效。改成只做「本插件那一行」的文本手术，别人的行
+  // 一个字都不碰。
+  let settingsError = null
+  const yamlScalar = (value) => {
+    if (typeof value === 'boolean' || typeof value === 'number') return String(value)
+    return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+  }
+  const configBlock = (config) => {
+    const lines = []
+    for (const key of Object.keys(config)) {
+      const value = config[key]
+      if (Array.isArray(value)) {
+        lines.push(`    ${key}:`)
+        for (const item of value) lines.push(`      - ${yamlScalar(item)}`)
+      } else {
+        lines.push(`    ${key}: ${yamlScalar(value)}`)
+      }
+    }
+    return lines.length ? lines : ['    {}']
+  }
+  // 拿 profile patch 的路径。官方留了两个口子，都能用：
+  //   - ctx.settings.prepareDocument() → Promise<string>（注意是 Promise，且解析出来
+  //     直接就是路径字符串，不是 { patchPath } 对象——第一版就是在这儿栽了）
+  //   - ctx.settings.documentPath → 同步 getter，底层读 profileContext.patchPath
+  //   - ctx.get('profileContext').patchPath → 最直的一条
+  // 三条都试，谁先给出绝对路径用谁。
+  // 三条路试过的原始值/报错都攒在这儿，失败时原样报给用户和诊断文件。
+  const patchPathAttempts = []
+  const locatePatchPath = async () => {
+    patchPathAttempts.length = 0
+    const push = (value) => {
+      if (typeof value === 'string' && value.trim() !== '') { patchPathAttempts.push(value); return value }
+      return null
+    }
+    try {
+      if (ctx.settings && typeof ctx.settings.prepareDocument === 'function') {
+        const doc = await ctx.settings.prepareDocument()
+        const direct = push(doc)
+        if (direct) return direct
+        if (doc && typeof doc.patchPath === 'string') { const d = push(doc.patchPath); if (d) return d }
+      }
+    } catch (error) { patchPathAttempts.push(`prepareDocument 抛错: ${(error && error.message) || error}`) }
+    try { if (ctx.settings && ctx.settings.documentPath) { const d = push(ctx.settings.documentPath); if (d) return d } } catch {}
+    try {
+      const profile = typeof ctx.get === 'function' ? ctx.get('profileContext') : null
+      if (profile) { const d = push(profile.patchPath); if (d) return d }
+    } catch {}
+    return null
+  }
+  const writePatchDirectly = async (config) => {
+    const patchPath = await locatePatchPath()
+    if (!patchPath) {
+      throw new Error(`拿不到 profile patch 路径（prepareDocument / documentPath / profileContext 三条路都空：${patchPathAttempts.join(' | ') || '无信息'}）`)
+    }
+    const exists = nodeFs.existsSync(patchPath)
+    const before = exists ? nodeFs.readFileSync(patchPath, 'utf8') : ''
+    // 轻量体检：profile patch 顶层必须是 YAML 序列（一行一个 "- id: …"）。
+    // 这里不引 YAML 解析器，只做形态判断——看起来不是序列就拒绝改写，
+    // 免得往一份结构不同的文件里塞东西。
+    if (before.trim() !== '' && !before.split(/\r?\n/).some((line) => /^\s*-\s/.test(line))) {
+      throw new Error('profile patch 顶层不是 YAML 序列，拒绝改写')
+    }
+    const eol = before.includes('\r\n') ? '\r\n' : '\n'
+    const lines = before.length ? before.split(/\r?\n/) : []
+    while (lines.length && lines[lines.length - 1].trim() === '') lines.pop()
+    const rowRe = new RegExp(`^\\s*-\\s+id:\\s*['"]?${SETTINGS_NS}['"]?\\s*$`)
+    // 取最后一条匹配行：和宿主 configEditor.edit 的 findLastIndex 一致（后写胜）
+    let start = -1
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (rowRe.test(lines[i])) { start = i; break }
+    }
+    const indent = start >= 0 ? /^\s*/.exec(lines[start])[0].length : 0
+    const keyIndent = ' '.repeat(indent + 2)
+    let next
+    if (start >= 0) {
+      // 本行的范围：到下一个同级（或更浅）的列表项为止
+      let end = lines.length
+      for (let j = start + 1; j < lines.length; j++) {
+        const lead = /^\s*/.exec(lines[j])[0].length
+        if (/^\s*-\s/.test(lines[j]) && lead <= indent) { end = j; break }
+      }
+      // 行内已有 config 块的范围（块样式整行，或行内样式只占一行）
+      const cfgRe = new RegExp(`^${keyIndent}config:`)
+      let cfgStart = -1
+      for (let j = start + 1; j < end; j++) {
+        if (cfgRe.test(lines[j])) { cfgStart = j; break }
+      }
+      let cfgEnd = end
+      if (cfgStart >= 0) {
+        cfgEnd = cfgStart + 1
+        for (let j = cfgStart + 1; j < end; j++) {
+          const lead = /^\s*/.exec(lines[j])[0].length
+          if (lines[j].trim() !== '' && lead <= indent + 2) break
+          cfgEnd = j + 1
+        }
+      }
+      const block = [`${keyIndent}config:`].concat(configBlock(config))
+      next = (cfgStart >= 0
+        ? lines.slice(0, cfgStart).concat(block, lines.slice(cfgEnd))
+        : lines.slice(0, end).concat(block, lines.slice(end))).join(eol)
+    } else {
+      // 没有本插件的行：在末尾追加一条，别人的行保持原样
+      const row = [`- id: ${SETTINGS_NS}`, `  name: ${PLUGIN_ID}`, '  config:'].concat(configBlock(config))
+      next = lines.concat(row).join(eol)
+    }
+    if (!next.endsWith(eol)) next += eol
+    if (exists) nodeFs.copyFileSync(patchPath, `${patchPath}.dsc-backup`)
+    nodeFs.writeFileSync(patchPath, next, 'utf8')
+    // 写完读回来核对：每一项都得在文件里，否则还原备份并报错
+    const checkLines = nodeFs.readFileSync(patchPath, 'utf8').split(/\r?\n/)
+    const missing = Object.keys(config).filter((key) => !checkLines.some((line) => new RegExp(`^\\s+${key}:`).test(line)))
+    if (missing.length) {
+      if (exists) nodeFs.copyFileSync(`${patchPath}.dsc-backup`, patchPath)
+      throw new Error(`原生改写后核对失败，已还原备份；缺失字段: ${missing.join(', ')}`)
+    }
+  }
+  const persistSettings = async (patch) => {
+    settingsError = null
+    let primary = 'ctx.settings.update 不可用'
+    if (ctx.settings && typeof ctx.settings.update === 'function') {
+      try {
+        await ctx.settings.update(SETTINGS_NS, patch)
+        return
+      } catch (error) {
+        primary = (error && error.message) || String(error)
+      }
+    }
+    // 写完整的一份而不是只写改动的那几项：effective() 就是「默认值 + 已落盘值
+    // + 本次改动」，整份写进去天然幂合，也顺带修好历史上丢掉的值。
+    const full = safeSettings(effective())
+    try {
+      await writePatchDirectly(full)
+    } catch (error) {
+      settingsError = `宿主 settings.update 失败（${primary}）；原生改写 profile patch 也失败（${(error && error.message) || error}）`
+      warn(`settings 持久化失败: ${settingsError}`)
+      throw new Error(settingsError)
+    }
+    warn(`settings.update 失败，已用原生改写 profile patch 兜住: ${primary}`)
+    trace('settings-native-write', { keys: Object.keys(patch), primary })
+  }
+
+  // ── 诊断：宿主为什么不肯收我们的设置 ──────────────────────────────────────
+  //
+  // ctx.settings.update() 报的是 `No configurable plugin entry "dsh-secret-card"`，
+  // 这句话在宿主里同时覆盖两种情况（dsh-settings/lib/index.js:502-504）：
+  //   a) configEditor.entries() 里根本没有我们这一行；
+  //   b) 有这一行，但 entry.fiber.runtime.Config 取不到（schema 发现失败）。
+  // 光看报错分不出是哪种，所以把 loader 的真实条目构成一份 JSON 落到插件目录，
+  // 重启后直接读文件，不用猜。
+  const dumpDiagnostics = async (reason) => {
+    const out = { at: new Date().toISOString(), reason: String(reason || ''), settingsNs: SETTINGS_NS }
+    const safe = (fn, fallback) => { try { return fn() } catch (error) { return `${fallback}: ${(error && error.message) || error}` } }
+    out.patchPath = await safe(async () => (await locatePatchPath()) || '(空)', 'locatePatchPath 失败')
+    out.patchPathAttempts = patchPathAttempts.slice()
+    // schemastery 到底从哪条路拿到的 / 每条为何失败。Config 取不到时这份就是根因
+    out.schemastery = {
+      attempts: schemasteryAttempts.slice(),
+      configIsSchema: Boolean(Config && typeof Config === 'function' && 'toJSON' in Config),
+      configKeys: Config && Config.dict ? Object.keys(Config.dict) : null
+    }
+    out.describe = safe(() => {
+      const rows = ctx.settings && typeof ctx.settings.describe === 'function' ? ctx.settings.describe() : []
+      return {
+        count: rows.length,
+        ns: rows.map((row) => row.ns),
+        ours: rows.some((row) => row.ns === SETTINGS_NS)
+      }
+    }, 'describe 失败')
+    out.entries = safe(() => {
+      const list = ctx.loader && typeof ctx.loader.entries === 'function' ? [...ctx.loader.entries()] : []
+      return {
+        count: list.length,
+        rows: list.map((entry) => {
+          const treeRoot = safe(() => entry.parent && entry.parent.tree && entry.parent.tree.ctx && entry.parent.tree.ctx.fiber && entry.parent.tree.ctx.fiber.entry && entry.parent.tree.ctx.fiber.entry.id, '?')
+          return {
+            id: entry.options && entry.options.id,
+            name: entry.options && entry.options.name,
+            treeRoot,
+            disabled: Boolean(entry.options && entry.options.disabled),
+            fiberState: entry.fiber ? entry.fiber.state : null,
+            hasRuntime: Boolean(entry.fiber && entry.fiber.runtime),
+            hasRuntimeConfig: Boolean(entry.fiber && entry.fiber.runtime && entry.fiber.runtime.Config)
+          }
+        })
+      }
+    }, 'loader.entries 失败')
+    out.configEditorEntries = safe(() => {
+      const editor = typeof ctx.get === 'function' ? ctx.get('configEditor') : null
+      if (!editor || typeof editor.entries !== 'function') return '(拿不到 configEditor 服务)'
+      const rows = editor.entries()
+      return { count: rows.length, ids: rows.map((row) => row.options && row.options.id), ours: rows.some((row) => row.options && row.options.id === SETTINGS_NS) }
+    }, 'configEditor.entries 失败')
+    out.settingsService = safe(() => ({
+      keys: ctx.settings ? Object.getOwnPropertyNames(Object.getPrototypeOf(ctx.settings)).concat(Object.keys(ctx.settings)) : [],
+      documentPath: ctx.settings ? ctx.settings.documentPath : null
+    }), 'settings 自省失败')
+    out.settingsError = settingsError
+    try {
+      nodeFs.writeFileSync(DIAG_FILE, `${JSON.stringify(out, null, 2)}\n`, 'utf8')
+    } catch (error) {
+      warn(`诊断落盘失败: ${(error && error.message) || error}`)
+    }
+    return out
+  }
+
   try {
     ctx.effect(() => {
       const off = ctx.on('settings/document-updated', (ns) => {
@@ -943,6 +1244,7 @@ async function applyAsync (ctx, config = {}) {
               armed: true,
               pending: pending.size,
               clients: hub.size,
+              settingsError,
               settings: safeSettings(effective())
             })
             return
@@ -952,8 +1254,16 @@ async function applyAsync (ctx, config = {}) {
           if (req.method === 'GET' && apiPath.endsWith(`${API_BASE}/settings`)) {
             sendJson(res, 200, {
               settings: safeSettings(effective()),
-              defaults: safeSettings(DEFAULTS)
+              defaults: safeSettings(DEFAULTS),
+              settingsError
             })
+            return
+          }
+
+          // GET /diag — 把宿主 loader / configEditor 的真实构成抓一份（排查设置写不回）
+          if (req.method === 'GET' && apiPath.endsWith(`${API_BASE}/diag`)) {
+            const snapshot = await dumpDiagnostics('manual')
+            sendJson(res, 200, { ok: true, diag: snapshot })
             return
           }
 
@@ -962,12 +1272,14 @@ async function applyAsync (ctx, config = {}) {
             const body = await readJsonBody(req)
             const patch = sanitizePatch(body)
             Object.assign(memoryPatch, patch)
-            if (ctx.settings && typeof ctx.settings.update === 'function') {
-              try { await ctx.settings.update(SETTINGS_NS, patch) }
-              catch (error) { warn(`settings update 失败（仅本次运行生效）: ${(error && error.message) || error}`) }
-            }
-            trace('settings-updated', { keys: Object.keys(patch) })
-            sendJson(res, 200, { settings: safeSettings(effective()) })
+            let writeFailed = null
+            try { await persistSettings(patch) } catch (error) { writeFailed = (error && error.message) || String(error) }
+            if (writeFailed) { try { await dumpDiagnostics(`PUT /settings 失败: ${writeFailed}`) } catch {} }
+            trace('settings-updated', { keys: Object.keys(patch), failed: writeFailed !== null })
+            sendJson(res, writeFailed ? 500 : 200, {
+              settings: safeSettings(effective()),
+              settingsError: writeFailed || settingsError
+            })
             return
           }
 
@@ -1228,6 +1540,8 @@ async function applyAsync (ctx, config = {}) {
     hasTool: Boolean(ctx.tools && typeof ctx.tools.register === 'function'),
     suffixes: effective().allowedSuffixes
   })
+  // 开机就抓一份宿主构成：设置写不回时不用等用户复现，直接读 .dsc-diag.json
+  try { await dumpDiagnostics('startup') } catch {}
 }
 
 // ── 小工具函数（apply 作用域之外也要用）────────────────────────────────────
@@ -1284,10 +1598,28 @@ function sanitizePatch (body) {
   return patch
 }
 
+// Config 必须是「具名导出」，且**必须排在对象字面量第一个**。宿主
+// cordis-plugin-loader/lib/index.js:451 是 `await import(插件名)`（ESM 动态
+// import），CJS 模块此时只有 cjs-module-lexer 静态认得的属性才会成为具名导出。
+// 实测这个 lexer 的脾气（%TEMP%\dsc-lex 五组对照）：
+//   { name:'x', inject:['a'], Config }      → 一个都不认（撞上 inject 数组字面量就整体放弃）
+//   { name:'x', inject:['a'], Config:Config } → 同样不认
+//   { Config, name:'x' }                     → 认
+//   exports.Config = Config                  → 认
+//   Object.defineProperty(getter)            → 不认
+// 也就是说 `inject: [...]` 这种数组字面量会让 lexer 半路放弃，排在它后面的属性
+// 全丢。原来的写法 `Config: Config ?? undefined` 又正好排在 inject 后面，于是宿主
+// 只能从 default 里翻，entry.fiber.runtime.Config 恒为 undefined，settings 的
+// describe() 当我们「没有设置项」，报 No configurable plugin entry。
+// 实测踩过：named keys = default,module.exports,name，而 m.default.Config 是好的。
+// 对照：dsh-context / dsh-better-sidebar 都是原生 ESM `export { Config, ... }`，
+// 没这个坑。
+// Config 放最前，值 undefined 时导出键依然存在（host 的 schema() 对 undefined
+// 走「无 schema」分支，不抛错）。
 module.exports = {
+  Config,
   name: PLUGIN_ID,
   inject: ['tools', 'webServer', 'systemPrompt', 'connection', 'settings'],
-  Config: Config ?? undefined,
   __internals: {
     DEFAULTS,
     TOOL_NAME,

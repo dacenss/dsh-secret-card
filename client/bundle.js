@@ -111,6 +111,7 @@ const CLIENT_MESSAGES = {
     settingsReset: '恢复默认',
     settingsLoadFailed: '读不到当前设置，显示的是默认值。',
     settingsSaveFailed: '保存失败，可以重试。',
+    settingsPersistFailed: '没能写进配置文件，这次改动重启后会丢',
     settingsDefault: '默认'
   },
   en: {
@@ -185,6 +186,7 @@ const CLIENT_MESSAGES = {
     settingsReset: 'Reset to defaults',
     settingsLoadFailed: 'Could not read current settings — showing defaults.',
     settingsSaveFailed: 'Saving failed — you can retry.',
+    settingsPersistFailed: 'Could not write the config file — this change is lost on restart',
     settingsDefault: 'Default'
   }
 }
@@ -286,6 +288,8 @@ const STYLE = `<style id="${STYLE_ID}">
 .dsc-status{min-height:16px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary, #b8b8c2);overflow-wrap:anywhere}
 .dsc-status.ok{color:var(--dsw-alias-state-success-primary, #34a853)}
 .dsc-status.err{color:var(--dsw-alias-state-error-primary, #ea4335)}
+.dsc-statusHead{font-weight:600}
+.dsc-statusDetail{margin-top:2px;font-size:11px;line-height:15px;opacity:.85;white-space:pre-wrap}
 .dsc-footerActions{flex-shrink:0;align-items:center;gap:12px;display:flex}
 .dsc-btn{display:inline-flex;align-items:center;justify-content:center;gap:4px;height:36px;padding:0 14px;border:none;border-radius:var(--dsw-radius-md, 8px);cursor:pointer;font-family:inherit;font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary, #f2f2f5);background:transparent;white-space:nowrap}
 .dsc-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.06))}
@@ -877,12 +881,14 @@ module.exports = {
       const loadSettingsPayload = async () => {
         let settings = null
         let defaults = null
+        let settingsError = null
         try {
           const res = await fetch(`${API}/settings`)
           if (res.ok) {
             const payload = await res.json().catch(() => null)
             if (payload && payload.settings) settings = payload.settings
             if (payload && payload.defaults) defaults = payload.defaults
+            if (payload && typeof payload.settingsError === 'string') settingsError = payload.settingsError
           }
         } catch {}
         const fallback = defaults || {
@@ -895,7 +901,7 @@ module.exports = {
           denyHosts: ['localhost', '127.0.0.1', '::1', '0.0.0.0', '169.254.169.254', 'metadata.google.internal'],
           language: 'auto'
         }
-        return { s: settings || fallback, fallback, loaded: !!settings }
+        return { s: settings || fallback, fallback, loaded: !!settings, settingsError }
       }
 
       // 构建设置表单。宿主「插件 → 插件名」详情页的配置区已经把窗口、标题、说明都画好了，
@@ -1057,12 +1063,18 @@ module.exports = {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(patch)
             })
-            if (!res.ok) throw new Error(`http_${res.status}`)
+            const payload = await res.json().catch(() => null)
+            if (!res.ok) throw new Error((payload && payload.settingsError) || `http_${res.status}`)
             applyLocale(patch.language === 'auto' ? detectLocale() : patch.language)
-            setSettingsStatus(t().settingsSaved, 'ok')
+            // 落盘成功才说「已保存」；host 那边留了失败原因就照实说
+            if (payload && typeof payload.settingsError === 'string' && payload.settingsError) {
+              warnSettings(payload.settingsError, t().settingsPersistFailed)
+            } else {
+              setSettingsStatus(t().settingsSaved, 'ok')
+            }
             return
-          } catch {
-            setSettingsStatus(t().settingsSaveFailed, 'err')
+          } catch (error) {
+            warnSettings((error && error.message) || String(error), t().settingsSaveFailed)
           } finally {
             saveBtn.disabled = false
           }
@@ -1070,6 +1082,16 @@ module.exports = {
         const setSettingsStatus = (text, kind) => {
           statusNode.className = `dsc-status${kind ? ' ' + kind : ''}`
           statusNode.textContent = text
+        }
+        // 「没能落盘」的真实原因：标题一行 + 细节一行。设置只在本次运行生效是
+        // 最难自查的一类故障，不能只写在控制台里，要摆到用户眼前。
+        const warnSettings = (detail, title) => {
+          try {
+            statusNode.className = 'dsc-status err'
+            statusNode.textContent = ''
+            statusNode.appendChild(el('div', { class: 'dsc-statusHead', text: title || '' }))
+            statusNode.appendChild(el('div', { class: 'dsc-statusDetail', text: String(detail || '') }))
+          } catch {}
         }
 
         const applyDefaults = () => {
@@ -1098,6 +1120,7 @@ module.exports = {
         return {
           body,
           footer,
+          warn: warnSettings,
           // 卸载时把输入框里的内容抹掉，减少残留窗口
           destroy: () => {
             try { timeoutInput.value = ''; keepInput.value = ''; suffixInput.value = ''; denyInput.value = '' } catch {}
@@ -1109,11 +1132,16 @@ module.exports = {
       const mountSettingsInline = (host) => {
         let destroyed = false
         let form = null
-        loadSettingsPayload().then(({ s, fallback, loaded }) => {
+        loadSettingsPayload().then(({ s, fallback, loaded, settingsError }) => {
           if (destroyed) return
           try {
             form = buildSettingsForm(s, fallback, loaded)
             host.appendChild(el('div', { class: 'dsc-settingsHost' }, [form.body, form.footer]))
+            // 上一次保存没能落盘时，一进设置页就把真实原因摆出来，
+            // 而不是让用户以为「已保存」就完了。
+            if (settingsError && form.warn) {
+              form.warn(settingsError, t().settingsPersistFailed)
+            }
           } catch {}
         }).catch(() => {})
         return {
