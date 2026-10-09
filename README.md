@@ -1,6 +1,8 @@
 # dsh-secret-card
 
 > npm 包名 `dsh-secret-card` · 源码与问题反馈：<https://github.com/dacenss/dsh-secret-card> · MIT · **English: [README.en.md](./README.en.md)**
+>
+> ![npm version](https://img.shields.io/npm/v/dsh-secret-card.svg) ![downloads](https://img.shields.io/npm/dm/dsh-secret-card.svg) ![license](https://img.shields.io/npm/l/dsh-secret-card.svg)
 
 dsh 插件 · **密钥安全输入卡片**。
 
@@ -35,6 +37,32 @@ pnpm add dsh-secret-card
 | AI 读配置文件来「确认写对了」→ 密钥再次进入模型上下文 | AI 只收到脱敏结果，不含密钥 |
 | 密钥是否有效，要把密钥发给第三方服务试 → 又进一次上下文 | 插件带着密钥去验证，只回「生效 / 不生效」 |
 
+## 安全声明
+
+**密钥由用户在本机弹出的卡片里输入，由插件直接写入配置文件；AI 全程接触不到明文，密钥也不经过任何第三方服务器。**
+
+- 密钥唯一一次「过网」，是从页面到本机宿主的同源请求（`POST /api/dsh-secret-card/fill`），不出本机；
+- 密钥出现在工具参数、消息、文件名、shell 命令里一律拒绝 —— 系统提示层明令禁止，代码层兜底拦截；
+- 验证密钥是否生效时由插件带着密钥去请求，只把「生效 / 不生效」还给 AI，响应体、响应头、命令输出都不外传。
+
+### 边界：它做不到的部分
+
+- **AI 事后仍可能读回配置文件看到明文** —— 这是提示层约束（系统提示明令禁止 + 返回值带 note），协议层无法物理阻止。敏感文件请用文件权限 / 加密卷进一步保护。
+- 备份文件 `<file>.bak-YYYYMMDD-HHmmssSSS` 与原文同敏感级，清理时请一并处理。
+- `fingerprint` 只是写入内容的哈希前 8 位，用于肉眼核对，不足以反推密钥。
+
+### 密钥不会出现在哪里（逐项保证）
+
+- 会话记录 / messages —— 密钥从不出现在任何 message，工具返回值与 `output.render` 均脱敏
+- `ctx.logger` —— 只打 requestId / 文件 / 键名 / 状态，单测断言日志序列化不含密钥
+- SSE 广播 —— 固定白名单字段，发送前断言不含密钥
+- HTTP 响应体 —— `/fill` 只回 status / validation，不 echo
+- 进程列表 —— 命令验证的 `%%SECRET%%` 只允许出现在 stdin，argv 出现即拒绝
+
+### 报告安全问题
+
+发现安全问题请通过 [GitHub Issues](https://github.com/dacenss/dsh-secret-card/issues) 报告，**不要在公开 Issue 里贴密钥明文**。
+
 ## 工作方式
 
 ```
@@ -52,15 +80,6 @@ AI 调用 secret_card(file, key, format, label, hint, validation?)
 resolve pending → 工具返回脱敏 JSON → AI 看到
 {status, validation, validationDetail, file, key, backup, fingerprint, note}
 ```
-
-## 密钥不会出现在哪里（硬性保证）
-
-- 会话记录 / messages —— 密钥从不出现在任何 message，工具返回值与 output.render 均脱敏
-- `ctx.logger` —— 只打 requestId / 文件 / 键名 / 状态，单测断言日志序列化不含密钥
-- SSE 广播 —— 固定白名单字段，发送前断言不含密钥
-- HTTP 响应体 —— `/fill` 只回 status / validation，不 echo
-- 进程列表 —— 命令验证的 `%%SECRET%%` 只允许出现在 stdin，argv 出现即拒绝
-- 备份文件 —— `<file>.bak-YYYYMMDD-HHmmssSSS` 与原文同敏感级，请一并保护
 
 ## 支持的写入格式（行级替换，保留注释与风格）
 
@@ -82,17 +101,9 @@ resolve pending → 工具返回脱敏 JSON → AI 看到
 - `quoted:false` —— 文件里就是 `KEY=值` 本身，直接取等号后面的部分即可
 - `quoted:true` —— 文件里是 `KEY="值"`，读取时先剥掉首尾双引号，再按 `\\` → `\`、`\"` → `"`、`\r` → 回车、`\n` → 换行 还原转义
 
-env/yaml 的无特殊字符值一律原样落盘，就是为了让 `grep`/`cut`/substring 这类朴素读法
-直接拿到真值；只有绕不开的特殊字符才动用引号，此时 `quoted:true` 会把规则讲清楚。
-
 ## 可选的「密钥是否生效」验证
 
-`validation` 参数是 JSON 字符串，`%%SECRET%%` 是唯一占位符：
-
-> 为什么不用常见的那对花括号占位（左花括号 ×2 + SECRET + 右花括号 ×2）：宿主的
-> 系统提示模板会把成对的花括号当变量引用，大写变量名会让整段插件提示注册失败
-> （实测报错 `malformed prompt variable reference`，报错信息里会带上你写的那个
-> 占位符原文）。`%%` 包裹则不冲突。
+`validation` 参数是 JSON 字符串，`%%SECRET%%` 是唯一占位符（不用常见的一对花括号占位，是因为宿主系统提示模板会把成对花括号当变量引用、导致整段注册失败）：
 
 ```jsonc
 // HTTP 验证（推荐）
@@ -127,19 +138,6 @@ metadata.google.internal`，可在设置里增删）时直接拒绝。
 | `allowedSuffixes` | 见上 | 允许写入的文件后缀白名单 |
 | `allowCommandValidation` | `false` | 是否允许 AI 提供命令验证 |
 | `denyHosts` | 见上 | HTTP 验证禁止访问的主机 |
-| `language` | `auto` | 界面语言：`auto` 按本机语言识别、`zh` 中文、`en` 英文 |
-
-## 界面语言
-
-界面文字分两处，各自按本机语言识别，**识别不到一律用英文**：
-
-| 位置 | 文字给谁看 | 识别方式 |
-| --- | --- | --- |
-| 输入卡片 | 用户 | 浏览器语言（`navigator.language`） |
-| 工具说明 / 回执 / 系统提示 | 模型 | 环境变量 `LC_ALL` / `LC_MESSAGES` / `LANG` / `LANGUAGE`，再兜到系统locale |
-
-语言串只要以 `zh` 开头（`zh`、`zh-CN`、`zh-TW`…）就走中文，其余全部走英文。
-想固定语言，改设置页的 `language`：填 `zh` 或 `en` 就锁死不动，填 `auto` 恢复自动识别。
 
 ## 工具返回值契约
 
@@ -157,8 +155,6 @@ metadata.google.internal`，可在设置里增删）时直接拒绝。
 }
 ```
 
-`fingerprint` 只是写入内容的哈希前 8 位，用于肉眼核对，不足以反推密钥。
-
 ## 卡片停在哪、怎么提醒
 
 - 卡片挂在**会话列里输入框的正上方**（宿主 `conversation.input.dock` / `conversation.composer`
@@ -171,8 +167,6 @@ metadata.google.internal`，可在设置里增删）时直接拒绝。
 
 ## 已知限制
 
-- **AI 事后仍可能读回配置文件看到明文**：这是提示层约束（系统提示明令禁止 +
-  返回值里带 note），协议层无法物理阻止。敏感文件请用文件权限 / 加密卷进一步保护。
 - 只支持根级键；嵌套 JSON/YAML 的深层路径需要后续版本。
 - 卡片是单例的：一次只处理一个密钥，重复请求会合并到同一张卡。
 
@@ -186,11 +180,6 @@ npm run check           # node --check 宿主与客户端源码
 npm run build:client    # client/index.js → client/bundle.js
 npm test                # 单元 41 项 + 集成 8 项 + 文案红线 1 项（共 50 项）
 ```
-
-加新语言要动两处：`src/index.js` 里的 `MESSAGES` 表（模型看的文案）、
-`client/index.js` 里的 `CLIENT_MESSAGES` 表（用户看的卡片文案）。两边按同一
-套判定分档（`zh` 开头走中文、其余英文），`test/secret-card.test.mjs` 里有断言
-要求两张表的键逐一对齐——漏一个键就是漏一句话。
 
 用 `file:` 协议把源码装进 profile 的话，改完源码必须手动同步（pnpm 对已装的
 file 依赖不会重新拷贝），然后重启 DSH：

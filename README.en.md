@@ -1,6 +1,8 @@
 # dsh-secret-card
 
 > npm package `dsh-secret-card` · Source & issues: <https://github.com/dacenss/dsh-secret-card> · MIT · **中文说明见 [README.md](./README.md)**
+>
+> ![npm version](https://img.shields.io/npm/v/dsh-secret-card.svg) ![downloads](https://img.shields.io/npm/dm/dsh-secret-card.svg) ![license](https://img.shields.io/npm/l/dsh-secret-card.svg)
 
 A dsh plugin · **secure card for entering secrets**.
 
@@ -39,6 +41,32 @@ installing.
 | AI reads the config file to "check it wrote correctly" → secret re-enters the model context | AI only gets a redacted result, no secret inside |
 | Testing whether a key works means sending it to a third party → into the context again | The plugin carries the secret to the validation endpoint and only reports "valid / not valid" |
 
+## Security statement
+
+**The secret is typed by the user into a card on their own machine and written straight into the config file by the plugin. The AI never sees the plaintext, and the secret never passes through any third-party server.**
+
+- The only time the secret crosses a wire is a same-origin request from the page to the local host (`POST /api/dsh-secret-card/fill`) — it never leaves the machine.
+- A secret appearing in tool arguments, messages, file names or shell commands is rejected outright — forbidden at the system-prompt layer, blocked again in code.
+- When validating whether a secret works, the plugin carries the secret to the endpoint and hands the AI back only "valid / not valid" — response bodies, response headers and command output are never forwarded.
+
+### Boundaries: what it cannot do
+
+- **The AI can still read the config file afterwards and see the plaintext.** This is a prompt-layer constraint (the system prompt forbids it and the result carries a note); the protocol layer cannot physically prevent it. Protect sensitive files further with file permissions or an encrypted volume.
+- Backup files `<file>.bak-YYYYMMDD-HHmmssSSS` are as sensitive as the original — clean them up too.
+- `fingerprint` is just the first 8 hex characters of the written value's hash, for eyeballing a match. It cannot be reversed into the secret.
+
+### Where the secret cannot show up (item by item)
+
+- Conversation record / messages — the secret appears in no message; both the tool return value and `output.render` are redacted
+- `ctx.logger` — logs only requestId / file / key / status; a unit test asserts the serialized log contains no secret
+- SSE broadcast — a fixed field whitelist, asserted secret-free before sending
+- HTTP response body — `/fill` returns only status / validation, never echoes
+- Process list — for command validation, `%%SECRET%%` is only allowed on stdin; showing up in argv is rejected
+
+### Reporting security issues
+
+Please report security issues through [GitHub Issues](https://github.com/dacenss/dsh-secret-card/issues) and **never paste a plaintext secret into a public issue**.
+
 ## How it works
 
 ```
@@ -56,15 +84,6 @@ Host: writes the config file (back up first, temp file + rename for an atomic wr
 resolve pending → tool returns redacted JSON → AI sees
 {status, validation, validationDetail, file, key, backup, fingerprint, note}
 ```
-
-## Where the secret cannot show up (hard guarantees)
-
-- Conversation record / messages — the secret appears in no message; both the tool return value and `output.render` are redacted
-- `ctx.logger` — logs only requestId / file / key / status; a unit test asserts the serialized log contains no secret
-- SSE broadcast — a fixed field whitelist, asserted secret-free before sending
-- HTTP response body — `/fill` returns only status / validation, never echoes
-- Process list — for command validation, `%%SECRET%%` is only allowed on stdin; showing up in argv is rejected
-- Backup files — `<file>.bak-YYYYMMDD-HHmmssSSS` are as sensitive as the original, protect them too
 
 ## Supported write formats (line-level replacement, keeps comments and style)
 
@@ -86,20 +105,9 @@ The `quoted` field in the write result says whether this write added quotes; the
 - `quoted:false` — the file holds `KEY=value` as-is; take whatever follows the `=`
 - `quoted:true` — the file holds `KEY="value"`; strip the surrounding double quotes, then unescape `\\` → `\`, `\"` → `"`, `\r` → CR, `\n` → newline
 
-Simple env/yaml values are always written unquoted precisely so that naive readers
-(`grep`, `cut`, substring) get the real value directly. Quotes are reserved for values
-that actually need them, and then `quoted:true` states the parsing rule.
-
 ## Optional "does it work" validation
 
-The `validation` argument is a JSON string, and `%%SECRET%%` is the only placeholder:
-
-> Why not the familiar brace-delimited placeholder (two consecutive left braces, then
-> SECRET, then two consecutive right braces)? The host's system-prompt template treats
-> paired braces as a variable reference, and an upper-case variable name makes the whole
-> plugin section fail to register (real error: `malformed prompt variable reference`,
-> which quotes the placeholder you wrote right back at you). Wrapping in `%%` does not
-> collide.
+The `validation` argument is a JSON string, and `%%SECRET%%` is the only placeholder (the familiar brace-delimited form is avoided because the host's system-prompt template reads paired braces as a variable reference and fails to register the whole section):
 
 ```jsonc
 // HTTP validation (recommended)
@@ -138,21 +146,6 @@ reading back the value that was just written, and allows only one secret at a ti
 | `allowedSuffixes` | see above | Allowlist of writable file suffixes |
 | `allowCommandValidation` | `false` | Whether the AI may supply a validation command |
 | `denyHosts` | see above | Hosts HTTP validation may not reach |
-| `language` | `auto` | UI language: `auto` follows this machine, `zh` Chinese, `en` English |
-
-## UI language
-
-Interface text lives in two places, each detected on its own, and **English is the
-fallback whenever detection fails**:
-
-| Where | Who reads it | Detected from |
-| --- | --- | --- |
-| The input card | the user | browser language (`navigator.language`) |
-| Tool description / result / system prompt | the model | env vars `LC_ALL` / `LC_MESSAGES` / `LANG` / `LANGUAGE`, then the system locale |
-
-A language tag starting with `zh` (`zh`, `zh-CN`, `zh-TW`…) selects Chinese; anything
-else selects English. To pin a language, set `language` in the settings page: `zh` or
-`en` locks it, `auto` restores auto-detection.
 
 ## Tool result contract
 
@@ -169,9 +162,6 @@ else selects English. To pin a language, set `language` in the settings page: `z
   "note": "The secret was typed by the user directly into the card and written to the file. This result contains no plaintext — do not read that file's value either."
 }
 ```
-
-`fingerprint` is just the first 8 hex characters of the written value's hash, for
-eyeballing a match. It cannot be reversed into the secret.
 
 ## Where the card sits and how you get reminded
 
@@ -191,10 +181,6 @@ eyeballing a match. It cannot be reversed into the secret.
 
 ## Known limits
 
-- **The AI can still read the config file afterwards and see the plaintext.** This is a
-  prompt-layer constraint (the system prompt forbids it and the result carries a note);
-  the protocol layer cannot physically prevent it. Protect sensitive files further with
-  file permissions or an encrypted volume.
 - Top-level keys only; deep paths in nested JSON/YAML need a later version.
 - The card is a singleton: one secret at a time, repeat requests merge into the same card.
 
@@ -208,12 +194,6 @@ npm run check           # node --check on the host and client sources
 npm run build:client    # client/index.js → client/bundle.js
 npm test                # 41 unit + 8 integration + 1 copy guard (50 total)
 ```
-
-Adding a language touches two places: the `MESSAGES` table in `src/index.js` (text the
-model reads) and the `CLIENT_MESSAGES` table in `client/index.js` (text on the user's
-card). Both use the same rule (`zh` prefix → Chinese, everything else → English), and
-`test/secret-card.test.mjs` asserts the two tables have exactly matching keys — a
-missing key is a missing sentence.
 
 If you install the source with a `file:` reference, changes must be mirrored manually
 (pnpm will not re-copy an already-installed file dependency), then restart DSH:
