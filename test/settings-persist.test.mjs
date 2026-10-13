@@ -272,10 +272,20 @@ test('真实 profile patch 当模板：别人的行一个字都不能动', async
       if (own.has(i)) continue
       assert.ok(after.includes(before[i]), `原有行丢了[${i}]: ${before[i]}`)
     }
-    // 别人的条目一个都没少
-    for (const id of ['agent-default-model', 'ui-settings-account', 'ui-chat', 'ui-settings',
-      'llm-deepseek', 'llm-pi-ai', 'web-search-free', 'dsh-mcp-manager', 'permission',
-      'browserskill', 'better-sidebar', 'agent-preset-registry', 'dsh-context']) {
+    // 别人的条目一个都没少。清单不写死——这份模板是活的，卸插件/换机器都会让
+    // 写死的名字过期（dsh-mcp-manager 被卸掉后就红过一次）。改成从模板自身推导：
+    // 收集所有与本插件条目同级的 `- id:`（缩深一致的才是同级；模型列表那些缩进
+    // 更深的 `- id:` 不是条目），排除自己，逐个断言还在。
+    const ownIndent = start >= 0 ? /^\s*/.exec(before[start])[0].length : 0
+    const otherIds = []
+    for (const line of before) {
+      const m = /^(\s*)-\s+id:\s*(.+?)\s*$/.exec(line)
+      if (!m || m[1].length > ownIndent) continue
+      const id = m[2].replace(/^['"]|['"]$/g, '').replace(/\s*#.*$/, '').trim()
+      if (id && id !== 'dsh-secret-card') otherIds.push(id)
+    }
+    assert.ok(otherIds.length > 0, '没从模板里读到任何别人的条目，推导逻辑坏了')
+    for (const id of otherIds) {
       assert.ok(after.some((l) => l.includes(`- id: ${id}`)), `别人的条目没了: ${id}`)
     }
     // 本插件只出现一次，不堆行
