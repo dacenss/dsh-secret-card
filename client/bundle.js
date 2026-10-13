@@ -1332,12 +1332,13 @@ module.exports = {
       // 注册进「插件 → 插件名」。设置只在宿主插件页里出现：卡片本身不放设置入口，
       // 也不在角落里挂浮动按钮，免得和宿主自己的界面抢位置。
       let tabLive = false
-      let tabDisposer = null
       let bundleDisposer = null
       // 「左侧面板 → 插件 → 点开本插件」这一页，配置区读的是 plugins.bundle.config
       // 这个带键位（keyed）的插槽，键就是插件的包名。用户在自己插件的详情页里
       // 就能直接看到设置表单 —— 这才是「插件 → 插件名」该有的位置。
-      // 另外再往 plugins.item 注册一张卡片（官方组里），多一条能点进去的路。
+      // 不注册 plugins.item：那个插槽在宿主里就是「官方」分组的渲染来源
+      // （dsh-client-ui-plugin-manager 的官方组 = 随附可选包 + plugins.item 条目），
+      // 第三方插件往里塞卡片会被误陈列成官方插件。
       const registerSettingsTab = () => {
         if (tabLive) return true
         const React = getReact()
@@ -1352,13 +1353,6 @@ module.exports = {
           if (bundle && typeof bundle.dispose === 'function') {
             bundleDisposer = () => { try { bundle.dispose() } catch {} }
           }
-          const item = slots.inject('plugins.item', () => slots.register({
-            name: 'plugins.item',
-            id: CLIENT_NAME,
-            order: 20, // 排在内置的「终端」(shell) 之后
-            label: () => t().tabLabel
-          }, SettingsItem))
-          if (item && typeof item.dispose === 'function') tabDisposer = () => { try { item.dispose() } catch {} }
           tabLive = true
           return true
         } catch {
@@ -1449,7 +1443,6 @@ module.exports = {
         try { document.removeEventListener('visibilitychange', onVisible) } catch {}
         try { unwatchSession() } catch {}
         try { if (es) es.close() } catch {}
-        try { if (tabDisposer) tabDisposer() } catch {}
         try { if (bundleDisposer) bundleDisposer() } catch {}
         try { if (seatDisposer) seatDisposer() } catch {}
         try { if (probeDisposer) probeDisposer() } catch {}
